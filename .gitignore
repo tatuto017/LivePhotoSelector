@@ -28,7 +28,10 @@ htmlcov/
 data/
 
 # 振り分け
-scoring/
+sorting/
+
+# Test Coverage
+coverage/
 
 # Build
 dist/

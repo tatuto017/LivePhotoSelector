@@ -11,16 +11,16 @@
   - 画面で使用する選別ファイルは、被写体別に`{actor}_analysis.json`を使用する。
     - 複数の被写体が同時に選別する可能性を考慮して被写体別に分ける。
   - スコアリング後の選別データは`analysis.json`に纏める。
-  - スコアリング時に、選別結果がOKの写真は確定済みフォルダに移動、NGの写真は削除する。
+  - データ整理時に、選別結果がOKの写真は確定済みフォルダに移動、NGの写真は削除する。
   - Scikit-learnの学習データは、各々の被写体に特化させる為に被写体別に分ける。
 - **保存アクション**: スワイプで OK/NG を即座に確定させる。
 - **解析**: DeepFace による重い解析は Mac のみで実行する。Raspberry Pi（Next.js）側には DeepFace をインストールしない。
   - [解析仕様](spec-analysis.md)
 - **スコアリング**: Scikit-learnによる学習とスコアリングはMac のみで実行する。Raspberry Pi（Next.js）側には Scikit-learn をインストールしない。
   - [スコアリング仕様](spec-scoring.md)
-- **スコアリングの安全な書き込み**: `--scoring` 実行時、Pi 側の同時書き込みを考慮し、スコア計算後に `analysis.json` を再読み込みして差分チェックを行う。差分があれば `score` のみをマージして保存する。
-- **振り分け**: Ollamaによる振り分けは Mac のみで実行する。Raspberry Pi（Next.js）側には Ollama をインストールしない。
-  - [振り分け仕様](spec-sorting.md)
+- **データ整理**: スコアリング後にデータの整理を行う
+  - [データ整理仕様](spec-finalize.md)
+- **スコアリングの安全な書き込み**: `src.scoring.main` 実行時、Pi 側の同時書き込みを考慮し、スコア計算後に `analysis.json` を再読み込みして差分チェックを行う。差分があれば `score` のみをマージして保存する。
 - **保存方法**: Raspberry Pi 上の Next.js が OneDrive マウント先の `{actor}_analysis.json` を直接読み書きする。
 - **データ連携**: Mac と Raspberry Pi の両方に OneDrive をマウントし、ファイルシステムを共有する。
 - **外部アクセス**: Cloudflare Tunnel を使用して iPhone（外出先）から Raspberry Pi に安全にアクセスする。

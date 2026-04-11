@@ -19,9 +19,8 @@ iPhone から高速に選別するための Web アプリ。
 | --- | --- |
 | フロントエンド | Next.js 15 (App Router), TypeScript, Tailwind CSS, framer-motion |
 | バックエンド | Next.js API Routes（ローカル FS 直接読み書き） |
-| 解析スクリプト | Python 3.13, DeepFace, OpenCV, Pillow, python-dotenv |
-| スコアリングスクリプト | Python 3.13, Scikit-learn, pandas, python-dotenv |
-| 振り分けスクリプト | Python 3.13, Ollama (llama3.2-vision), OpenCV, Pillow, python-dotenv |
+| 解析スクリプト | Python 3.13, DeepFace, OpenCV (opencv-python-headless), Pillow, tf-keras, python-dotenv, tqdm |
+| スコアリングスクリプト | Python 3.13, Scikit-learn, pandas, python-dotenv, tqdm |
 | ホスティング | Raspberry Pi 4 + Cloudflare Tunnel |
 | ストレージ | OneDrive（Mac・Pi 双方にローカルマウント） |
 
@@ -58,14 +57,13 @@ Next.js（Pi）と Python 解析スクリプト（Mac）で同じ変数名を共
 - **Frontend**: `npm test -- --coverage`（カバレッジ 100% 目標）
 - **Analysis**: `python -m pytest src/analysis/tests/ --cov=src/analysis --cov-report=term-missing`（カバレッジ 100% 目標）
 - **Scoring**: `python -m pytest src/scoring/tests/ --cov=src/scoring --cov-report=term-missing`（カバレッジ 100% 目標）
-- **Sorting**: `python -m pytest src/sorting/tests/ --cov=src/sorting --cov-report=term-missing`（カバレッジ 100% 目標）
 
 ---
 
 ## コーディング規約
 
 - **命名規則**: メソッド名・変数名はキャメルケース（例: `userName`, `myFunction()`）
-- **セキュリティ**: 認証情報はソースコードに直接記載しない（`.env.local` 等を使用）。画像配信時はパストラバーサル対策を必ず行う。
+- **セキュリティ**: 認証情報はソースコードに直接記載しない（`.env` を使用）。画像配信時はパストラバーサル対策を必ず行う。
 - **設計**: 依存性の注入（DI）で実装し、疎結合を保つ。
 - **ドキュメント**: 全てのクラス・関数に Doc コメントを必ず記載する。
 - **可読性**: 処理の意図が分かるよう、ロジックには適宜内部コメントを記載する。

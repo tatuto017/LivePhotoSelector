@@ -4,6 +4,7 @@
 Scikit-learnよる学習と写真のスコアリング機能を作る。
 
 ## TODO
-- [ ] 実装
-- [ ] ユニットテスト
-- [ ] spec-directory.mdの`Mac`の`ローカル`を適宜更新する
+- [x] 実装
+- [x] ユニットテスト
+- [x] spec-directory.mdの`Mac`の`ローカル`を適宜更新する
+- [x] README.mdの更新

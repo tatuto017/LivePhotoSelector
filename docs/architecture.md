@@ -32,6 +32,67 @@
 - `python-dotenv` を使い、`run()` 冒頭で `_load_env()` を呼んで `.env` を読み込む（`override=False`）。
 - テスト時は `patch("src.analysis.main._load_env")` でスキップ可能。
 
+## データファイルの OneDrive 一元管理
+
+`analysis.json`・`analysis.pki`・`{actor}_model.joblib` の 3 ファイルを `{ONE_DRIVE_ROOT}/data/` に配置する。
+
+- **理由**: Mac（解析・スコアリング実行環境）と Raspberry Pi（選別 UI 実行環境）の双方が OneDrive をマウントしているため、PROJECT_ROOT に置くと環境ごとに別ファイルになり同期が取れない。OneDrive に一元化することで両環境から同一ファイルを参照できる。
+- **影響**: `{PROJECT_ROOT}/data/` はローカル専用の一時ファイル等の用途に限定され、現時点では使用ファイルなし。
+
+## OpenCV ヘッドレスモード
+
+Docker コンテナ等の GUI なし環境では `opencv-python` が `libGL.so.1` を要求して起動失敗する。そのため `opencv-python-headless` を使用する。
+
+- **対象**: 解析スクリプト（DeepFace が内部で OpenCV を使用）
+- **影響なし**: DeepFace が使う顔検出・特徴量抽出は headless 版でも動作する。
+
+## DeepFace の numpy 型変換
+
+DeepFace が返す感情スコアは `numpy.float32` 型であり、そのまま JSON にシリアライズすると `TypeError` が発生する。そのため `PhotoAnalyzer.analyze` 内で `AnalysisRecord` に格納する際に `float()` で Python ネイティブ型に変換する。
+
+- **対象フィールド**: `angry` / `fear` / `happy` / `sad` / `surprise` / `disgust` / `neutral`
+- **初期 score 計算**: `_run_analyze` 内の `max_val` も同様に `float(max_val)` で変換してから `round()` を適用する。
+
+## 解析スクリプトのクラッシュ耐性
+
+Raspberry Pi (QEMU x86_64 エミュレーション) は OOM Kill でプロセスが強制終了されるリスクがある。以下の対策を実施している。
+
+### 増分保存（per-image save）
+
+1 枚解析するたびに `analysis.pki` と `{actor}_analysis.json` を保存し、`inbox → images` への移動はその後に行う。OOM Kill 後に再起動しても既処理ファイルはスキップされ、続きから再開できる。
+
+### アトミック書き込み
+
+`saveRecords` / `saveActorEntries` は以下の手順で書き込む。書き込み中の Kill によるファイル破損を防ぐ。
+
+1. 同一ディレクトリ内に一時ファイルを作成して書き込む
+2. `shutil.move` で宛先ファイルに上書き（同一 FS 内なので atomic rename）
+
+### JSON 破損フォールバック
+
+`loadActorEntries` は `JSONDecodeError` を捕捉して空リストを返す。破損した場合は当該アクターの JSON を再構築できる。
+
+### サブプロセスによる OOM Kill 分離
+
+`PhotoAnalyzer.analyze()` は DeepFace/TF のモデル読み込みを **サブプロセス**（`src.analysis.analyzer_subprocess`）で実行する。
+
+- **目的**: TF ランタイム＋感情モデルの読み込みがメモリを圧迫し、メインプロセスごと OOM Kill されると無限ループに陥る問題を防ぐ。
+- **動作**: サブプロセスが OOM Kill（exit 137）や解析エラーで終了した場合、メインプロセスは `None` として扱い次の画像に進む。
+- **効果**: メインプロセスは TF を一切読み込まないため軽量に保たれ、OOM Kill の対象にならない。サブプロセス終了ごとに TF・モデルのメモリが完全解放される。
+
+サブプロセス内では以下のメモリ削減対策を実施している:
+
+- **TF スレッド数の制限**: `TF_NUM_INTRAOP_THREADS=1` / `TF_NUM_INTEROP_THREADS=1` / `OMP_NUM_THREADS=1` を DeepFace インポート前に設定し、TF のスレッドプール用メモリを削減する。
+- **画像リサイズ**: PIL で長辺 640px 以内にリサイズしてから numpy 配列で DeepFace に渡す。6000x4000px 等の大きな画像のメモリ使用量を約 1/90 に削減する。
+
+### 自動再起動ループ（analyze.sh）
+
+```bash
+bash analyze.sh
+```
+
+`inbox` にファイルが残っている限り `python -m src.analysis.main` を再起動し続ける。正常終了（exit 0）または inbox が空になった時点でループを終了する。
+
 ## 画像配信のセキュリティ
 
 - `LocalAnalysisRepository.readImageFile()` にてパストラバーサル対策を実施。

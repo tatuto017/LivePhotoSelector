@@ -1,17 +1,16 @@
 # 解析スクリプト (DeepFace)
 deepface==0.0.93
-opencv-python==4.11.0.86
+opencv-python-headless==4.11.0.86
 Pillow==11.2.1
 
 # スコアリングスクリプト (Scikit-learn)
 scikit-learn==1.6.1
 pandas==2.2.3
 
-# 振り分けスクリプト (Ollama + ローカルLLM)
-ollama==0.4.8
-
 # 共通
 python-dotenv==1.1.0
+tqdm==4.67.3
+tf-keras==2.20.1
 
 # テスト
 pytest==8.3.5
