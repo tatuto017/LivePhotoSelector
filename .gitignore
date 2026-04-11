@@ -9,6 +9,7 @@ out/
 
 # Python
 .venv/
+.venv_docker/
 __pycache__/
 *.py[cod]
 *.pyo
