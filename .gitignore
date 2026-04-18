@@ -9,6 +9,7 @@ out/
 
 # Python
 .venv/
+.venv_m2/
 .venv_docker/
 __pycache__/
 *.py[cod]
@@ -28,9 +29,6 @@ htmlcov/
 # Data
 data/
 
-# 振り分け
-sorting/
-
 # Test Coverage
 coverage/
 
@@ -45,3 +43,6 @@ build/
 # OS
 .DS_Store
 Thumbs.db
+
+# task
+docs/tasks/
