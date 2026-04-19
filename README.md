@@ -8,12 +8,34 @@
 |---|---|
 | フロントエンド | Next.js 15 (App Router), TypeScript, Tailwind CSS, framer-motion |
 | バックエンド | Next.js API Routes, Drizzle ORM（MariaDB） |
-| 解析スクリプト | Python 3.13, DeepFace, Facenet, opencv-python-headless, Pillow, tf-keras, SQLAlchemy, tqdm |
-| スコアリングスクリプト | Python 3.13, Scikit-learn, pandas, SQLAlchemy, tqdm |
-| データ整理スクリプト | Python 3.13, SQLAlchemy |
+| 解析スクリプト | Python 3.13, DeepFace, Facenet, opencv-python-headless, Pillow, tf-keras, SQLAlchemy, python-dotenv, tqdm |
+| スコアリングスクリプト | Python 3.13, Scikit-learn, pandas, SQLAlchemy, python-dotenv, tqdm |
+| データ整理スクリプト | Python 3.13, SQLAlchemy, python-dotenv |
+| データベース | MariaDB（Raspberry Pi 上で稼働） |
 | ホスティング | Raspberry Pi 4 + Cloudflare Tunnel |
-| データベース | MySQL（Raspberry Pi 上で稼働） |
-| ストレージ | Mac から Pi の `data/` ディレクトリに直接マウント |
+| ストレージ | Mac の `DATA_ROOT` ディレクトリを Pi の `data/` にマウント |
+
+## 操作ワークフロー
+
+```text
+1. 写真を {DATA_ROOT}/inbox/{actor}/ に配置する
+
+2. Mac で解析（inbox → images へ移動 + MariaDB に登録）
+   bash analyze.sh
+   ※ OOM Kill 時は自動再起動。file_list.txt が空になるまでループする
+   ※ 1 枚処理するたびに file_list.txt からエントリを削除（再起動後の続きから再開対応）
+   ※ MariaDB に INSERT されるため Pi 側から即時参照可能
+
+3. iPhone で Pi にアクセスして OK/NG 選択
+   右スワイプ = OK  /  左スワイプ = NG
+   選択結果は MariaDB の sorting_state テーブルに即時書き込まれる
+
+4. スコアリング（演者ごとの傾向を学習・スコア更新）
+   python -m src.scoring.main
+
+5. 写真整理（OK → confirmed/ へ移動、NG → 削除）
+   python -m src.finalize.main
+```
 
 ## セットアップ
 
@@ -29,8 +51,6 @@ npm run dev
 ### Python スクリプト（Mac）
 
 #### 1. Python 3.13 のインストール
-
-Homebrew でインストールする。
 
 ```bash
 brew install python@3.13
@@ -49,86 +69,38 @@ brew install python@3.13
 
 ```bash
 cp .env.example .env
-# .env を編集して各パスを設定
+# .env を編集して各パスと DB 接続情報を設定
 ```
 
 #### 4. 初回実行時の注意
 
-初回実行時に DeepFace が感情モデル・Facenet モデルをダウンロードする（合計 約 100MB）。
+初回実行時に DeepFace が感情モデル・Facenet モデルをダウンロードする（合計 約 100MB）。  
 ダウンロード先は `~/.deepface/weights/`。
 
 ### 環境変数
 
-`.env` に以下を設定する。
+Next.js（Pi）と Python スクリプト（Mac）で同じ変数名を共有する。
 
 | 変数名 | 説明 |
 |---|---|
-| `PROJECT_ROOT` | プロジェクトのベースディレクトリ |
-| `MYSQL_HOST` | MySQL ホスト名 |
-| `MYSQL_PORT` | MySQL ポート番号 |
-| `MYSQL_USER` | MySQL ユーザー名 |
-| `MYSQL_PASSWORD` | MySQL パスワード |
-| `MYSQL_DATABASE` | MySQL データベース名 |
+| `PROJECT_ROOT` | プロジェクトのベースディレクトリ（Pi 側で使用） |
+| `DATA_ROOT` | データディレクトリの絶対パス（Mac 側で使用。`PROJECT_ROOT` 外に配置可能） |
+| `ANALYZE_ROOT` | 解析作業ディレクトリの絶対パス（Mac 側で使用。解析前の写真置き場） |
+| `MYSQL_HOST` | MariaDB ホスト名 |
+| `MYSQL_PORT` | MariaDB ポート番号 |
+| `MYSQL_USER` | MariaDB ユーザー名 |
+| `MYSQL_PASSWORD` | MariaDB パスワード |
+| `MYSQL_DATABASE` | MariaDB データベース名 |
 
 ```bash
 PROJECT_ROOT=/path/to/LivePhotoSelector
+DATA_ROOT=/path/to/data
+ANALYZE_ROOT=/path/to/analyze
 MYSQL_HOST=localhost
 MYSQL_PORT=3306
 MYSQL_USER=livephoto
 MYSQL_PASSWORD=secret
 MYSQL_DATABASE=livephoto
-```
-
-## 操作ワークフロー
-
-```
-1. 写真を data/inbox/{actor}/ に配置
-
-2. Mac で解析（inbox → images へ移動 + MySQL に登録）
-   bash analyze.sh
-   ※ OOM Kill 時は自動再起動。file_list.txt が空になるまでループする
-   ※ 1 枚処理するたびに file_list.txt からエントリを削除（再起動時の続きから再開対応）
-   ※ MySQL に INSERT されるため Pi 側から即時参照可能
-
-3. iPhone で Pi にアクセスして OK/NG 選別
-   右スワイプ = OK  /  左スワイプ = NG
-   選別結果は MySQL の sorting_state テーブルに即時書き込まれる
-
-4. スコアリング（Scikit-learn で学習・スコア付与）
-   python -m src.scoring.main
-
-5. 写真整理（OK → confirmed/ 移動、NG → 削除）
-   python -m src.finalize.main
-```
-
-## Raspberry Pi へのデプロイ
-
-```bash
-rsync -avz --delete \
-  --exclude='.claude' \
-  --exclude='.coverage' \
-  --exclude='.env' \
-  --exclude='.git' \
-  --exclude='.gitignore' \
-  --exclude='.next' \
-  --exclude='.pytest_cache' \
-  --exclude='.venv' \
-  --exclude='.venv_docker' \
-  --exclude='.vscode' \
-  --exclude='.claudeignore' \
-  --exclude='CLAUDE.md' \
-  --exclude='README.md' \
-  --exclude='analyze.sh' \
-  --exclude='src' \
-  --exclude='coverage' \
-  --exclude='data' \
-  --exclude='docs' \
-  --exclude='migrations' \
-  --exclude='node_modules' \
-  --exclude='package-lock.json' \
-  --exclude='vitest.config.ts' \
-  --exclude='vitest.setup.ts' \
-  /path/to/LivePhotoSelector/ pi@<PiのIPアドレス>:/path/to/LivePhotoSelector/
 ```
 
 ## 実行コマンド
@@ -141,10 +113,10 @@ npm run build     # 本番ビルド
 npm start         # 本番起動
 ```
 
-### 解析スクリプト
+### Python スクリプト
 
 ```bash
-# 解析（data/inbox の写真を DeepFace で解析して MariaDB に登録）
+# 解析（inbox の写真を DeepFace で解析して MariaDB に登録）
 # OOM Kill 時の自動再起動ループ込み
 bash analyze.sh
 
@@ -159,16 +131,45 @@ python -m src.finalize.main
 
 ```bash
 # フロントエンド（カバレッジ 100% 目標）
-npm test -- --coverage
+npm test
 
 # 解析スクリプト（カバレッジ 100% 目標）
-python -m pytest src/analysis/tests/ --cov=src/analysis --cov-report=term-missing
+.venv_docker/bin/python -m pytest src/analysis/tests/
 
 # スコアリングスクリプト（カバレッジ 100% 目標）
-python -m pytest src/scoring/tests/ --cov=src/scoring --cov-report=term-missing
+.venv_docker/bin/python -m pytest src/scoring/tests/
 
 # データ整理スクリプト（カバレッジ 100% 目標）
-python -m pytest src/finalize/tests/ --cov=src/finalize --cov-report=term-missing
+.venv_docker/bin/python -m pytest src/finalize/tests/
+```
+
+## Raspberry Pi へのデプロイ
+
+```bash
+rsync -avz --delete \
+  --exclude='.claude' \
+  --exclude='.claudeignore' \
+  --exclude='.coverage' \
+  --exclude='.env' \
+  --exclude='.git' \
+  --exclude='.gitignore' \
+  --exclude='.next' \
+  --exclude='.pytest_cache' \
+  --exclude='.venv' \
+  --exclude='.venv_docker' \
+  --exclude='.vscode' \
+  --exclude='CLAUDE.md' \
+  --exclude='README.md' \
+  --exclude='analyze.sh' \
+  --exclude='src' \
+  --exclude='coverage' \
+  --exclude='data' \
+  --exclude='docs' \
+  --exclude='node_modules' \
+  --exclude='package-lock.json' \
+  --exclude='vitest.config.ts' \
+  --exclude='vitest.setup.ts' \
+  /path/to/LivePhotoSelector/ pi@<PiのIPアドレス>:/path/to/LivePhotoSelector/
 ```
 
 ## ディレクトリ構成
@@ -191,46 +192,49 @@ python -m pytest src/finalize/tests/ --cov=src/finalize --cov-report=term-missin
 ├── app/                       # Next.js App Router
 │   ├── page.tsx               # 被写体一覧（Server Component）
 │   ├── actors/[actor]/
-│   │   └── page.tsx           # 写真選別（Server Component）
+│   │   └── page.tsx           # 写真選択（Server Component）
 │   └── api/
 │       └── actors/
 │           ├── route.ts                          # GET /api/actors
 │           └── [actor]/
-│               ├── photos/route.ts               # GET 写真一覧
-│               ├── photos/[filename]/route.ts    # PATCH 選別状態
+│               ├── photos/route.ts               # GET pending 写真一覧（ページネーション）
+│               ├── photos/[filename]/route.ts    # PATCH 選択状態
 │               └── images/[filename]/route.ts    # GET 画像配信
 ├── components/
 │   ├── PhotoCard.tsx          # 写真カード（スワイプ UI）
-│   └── PhotoSelectionClient.tsx  # 写真選別クライアント
+│   └── PhotoSelectionClient.tsx  # 写真選択クライアント
 ├── hooks/
 │   ├── usePinchZoom.ts        # ピンチズーム・パンフック
-│   └── usePhotoSelection.ts   # 選別状態管理フック
+│   └── usePhotoSelection.ts   # 選択状態管理フック
 ├── lib/
 │   ├── types.ts               # 共通型定義
-│   ├── db.ts                  # Drizzle ORM / MariaDB 接続管理
+│   ├── db.ts                  # MariaDB 接続プール（Drizzle ORM）
 │   ├── schema.ts              # Drizzle テーブル定義
 │   └── repositories/
-│       ├── PhotoRepository.ts          # Drizzle ORM リポジトリ
-│       └── LocalAnalysisRepository.ts  # FS 読み書きリポジトリ
+│       ├── LocalAnalysisRepository.ts  # MariaDB 読み書き + 画像配信（サーバーサイド）
+│       ├── PhotoRepository.ts          # pending 写真取得（クライアントサイド HTTP）
+│       └── ResultRepository.ts         # 選択状態保存（クライアントサイド HTTP）
+├── migrations/                # DB マイグレーション SQL
+│   ├── 001_create_analysis_records.sql
+│   └── 002_create_sorting_state.sql
 ├── docs/                      # 仕様・設計ドキュメント
 ├── analyze.sh                 # 解析自動再起動スクリプト
 └── requirements.txt           # Python 依存パッケージ
 ```
 
-解析前の写真置き場:
+解析作業ディレクトリ（`ANALYZE_ROOT` で指定、`PROJECT_ROOT` 外に配置可能）:
 
 ```text
 {ANALYZE_ROOT}/
-    ├── actor_a/
-    └── actor_b/
+├── actor_a/
+└── actor_b/
 ```
 
-Pi のデータディレクトリ:
+データディレクトリ（`DATA_ROOT` で指定、`PROJECT_ROOT` 外に配置可能）:
 
 ```text
-{PROJECT_ROOT}/
-├── data/
-│   └── {actor}_model.joblib   # 被写体別学習済みモデル
+{DATA_ROOT}/
+├── {actor}_model.joblib       # 被写体別学習済みモデル
 ├── images/                    # 解析済み写真
 │   ├── actor_a/
 │   └── actor_b/
@@ -238,9 +242,9 @@ Pi のデータディレクトリ:
     └── actor_a/
 ```
 
-MySQL（Raspberry Pi 上で稼働）:
+MariaDB（Raspberry Pi 上で稼働）:
 - データベース名: `livephoto`（環境変数 `MYSQL_DATABASE` で設定）
-- テーブル: `sorting_state`（被写体ごとの選別状態を管理）
+- テーブル: `analysis_records`、`sorting_state`（[テーブル設計](docs/spec-table.md) 参照）
 
 ## ドキュメント
 
@@ -254,3 +258,4 @@ MySQL（Raspberry Pi 上で稼働）:
 | [docs/spec-analysis.md](docs/spec-analysis.md) | DeepFace 解析仕様 |
 | [docs/spec-scoring.md](docs/spec-scoring.md) | Scikit-learn スコアリング仕様 |
 | [docs/spec-finalize.md](docs/spec-finalize.md) | データ整理仕様 |
+| [docs/DESIGN.md](docs/DESIGN.md) | UI デザイン仕様 |
