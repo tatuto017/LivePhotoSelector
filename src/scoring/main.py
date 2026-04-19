@@ -175,7 +175,7 @@ class ScoringRepository:
                 sorting_state.c.selected_at,
             )
             .where(sorting_state.c.actor_id == actor)
-            .order_by(sorting_state.c.score.desc().nulls_last())
+            .order_by(sorting_state.c.score.is_(None).asc(), sorting_state.c.score.desc())
         )
         with self._engine.connect() as conn:
             rows = conn.execute(stmt).fetchall()

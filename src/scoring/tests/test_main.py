@@ -315,6 +315,21 @@ class TestScoringRepository:
 
         assert result == []
 
+    def test_load_actor_entries_order_by_does_not_use_nulls_last(self, tmp_path: Path) -> None:
+        """MariaDB 非対応の NULLS LAST 構文を使わず IS NULL で NULL を末尾に並べること。"""
+        from sqlalchemy.dialects import mysql as mysql_dialect
+
+        repo, mock_engine = self._make_repo_with_engine(tmp_path)
+        mock_conn = self._setup_conn(mock_engine, rows=[])
+
+        repo.loadActorEntries("actor_a")
+
+        stmt = mock_conn.execute.call_args.args[0]
+        compiled_sql = stmt.compile(dialect=mysql_dialect.dialect()).string
+
+        assert "NULLS LAST" not in compiled_sql
+        assert "IS NULL" in compiled_sql
+
     # --- updateScore ---
 
     def test_update_score_executes_update_sql(self, tmp_path: Path) -> None:
