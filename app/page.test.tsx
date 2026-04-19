@@ -1,7 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 
-// LocalAnalysisRepository をモック化
+// lib/db と LocalAnalysisRepository をモック化
+vi.mock("@/lib/db", () => ({
+  createPool: vi.fn().mockReturnValue({}),
+  createDb: vi.fn().mockReturnValue({}),
+}));
 vi.mock("@/lib/repositories/LocalAnalysisRepository");
 import { LocalAnalysisRepository } from "@/lib/repositories/LocalAnalysisRepository";
 
@@ -37,7 +41,7 @@ describe("Home（被写体一覧ページ）", () => {
           readImageFile: vi.fn(),
         }) as unknown as LocalAnalysisRepository
     );
-    vi.stubEnv("ONE_DRIVE_ROOT", "/test/onedrive");
+    vi.stubEnv("PROJECT_ROOT", "/test/project");
   });
 
   it("被写体リストが表示される", async () => {
@@ -87,8 +91,8 @@ describe("Home（被写体一覧ページ）", () => {
 
     // Assert
     expect(LocalAnalysisRepository).toHaveBeenCalledWith(
-      "/test/onedrive/data",
-      "/test/onedrive/images"
+      expect.anything(),
+      "/test/project/images"
     );
     expect(mockGetActors).toHaveBeenCalledTimes(1);
   });

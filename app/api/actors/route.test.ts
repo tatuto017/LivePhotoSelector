@@ -1,6 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-// LocalAnalysisRepository をモック化
+// lib/db と LocalAnalysisRepository をモック化
+vi.mock("@/lib/db", () => ({
+  createPool: vi.fn().mockReturnValue({}),
+  createDb: vi.fn().mockReturnValue({}),
+}));
 vi.mock("@/lib/repositories/LocalAnalysisRepository");
 import { LocalAnalysisRepository } from "@/lib/repositories/LocalAnalysisRepository";
 
@@ -20,7 +24,7 @@ describe("GET /api/actors", () => {
           readImageFile: vi.fn(),
         }) as unknown as LocalAnalysisRepository
     );
-    vi.stubEnv("ONE_DRIVE_ROOT", "/test/onedrive");
+    vi.stubEnv("PROJECT_ROOT", "/test/project");
   });
 
   it("被写体リストを JSON で返す", async () => {
@@ -45,8 +49,8 @@ describe("GET /api/actors", () => {
 
     // Assert
     expect(LocalAnalysisRepository).toHaveBeenCalledWith(
-      "/test/onedrive/data",
-      "/test/onedrive/images"
+      expect.anything(),
+      "/test/project/data/images"
     );
     expect(mockGetActors).toHaveBeenCalledTimes(1);
   });

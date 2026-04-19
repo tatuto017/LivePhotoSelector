@@ -1,43 +1,62 @@
 import path from "path";
 import * as fs from "fs/promises";
+import { eq, and, desc, sql } from "drizzle-orm";
+import type { DrizzleDB } from "@/lib/db";
+import { sortingState } from "@/lib/schema";
 import { Photo, SelectionState } from "@/lib/types";
 
 /**
- * OneDrive ローカルマウント先から解析データと画像ファイルを読み書きするリポジトリ
+ * Drizzle ORM を使用して sorting_state テーブルから選別データを読み書きし、
+ * ローカル FS から画像ファイルを配信するリポジトリ
  */
 export class LocalAnalysisRepository {
-  private dataRoot: string;
+  private db: DrizzleDB;
   private imagesRoot: string;
 
-  constructor(dataRoot: string, imagesRoot: string) {
-    this.dataRoot = dataRoot;
+  /**
+   * @param db Drizzle ORM インスタンス
+   * @param imagesRoot 画像ファイルのルートディレクトリ
+   */
+  constructor(db: DrizzleDB, imagesRoot: string) {
+    this.db = db;
     this.imagesRoot = imagesRoot;
   }
 
   /**
-   * data ディレクトリ内の *_analysis.json ファイルから被写体IDリストを取得する
+   * sorting_state テーブルから被写体IDリストを取得する
+   * public = TRUE の写真が 1 枚以上ある被写体のみを返す
    */
   async getActors(): Promise<string[]> {
-    const files = await fs.readdir(this.dataRoot);
-    return files
-      .filter((f) => f.endsWith("_analysis.json"))
-      .map((f) => f.replace("_analysis.json", ""));
+    const rows = await this.db
+      .selectDistinct({ actor_id: sortingState.actor_id })
+      .from(sortingState)
+      .where(eq(sortingState.public, true))
+      .orderBy(sortingState.actor_id);
+    return rows.map((r) => r.actor_id);
   }
 
   /**
    * 被写体の写真一覧をスコア降順で取得する
-   * スコアが null の場合は 0 として扱う
+   * スコアが NULL の場合は 0 として扱う
    */
   async getPhotos(actor: string): Promise<Photo[]> {
-    const filePath = path.join(this.dataRoot, `${actor}_analysis.json`);
-    const content = await fs.readFile(filePath, "utf-8");
-    const photos: Photo[] = JSON.parse(content);
-    return [...photos].sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+    const rows = await this.db
+      .select({
+        filename: sortingState.filename,
+        shooting_date: sortingState.shooting_date,
+        score: sortingState.score,
+        selection_state: sortingState.selection_state,
+        selected_at: sortingState.selected_at,
+      })
+      .from(sortingState)
+      .where(eq(sortingState.actor_id, actor))
+      .orderBy(desc(sql`COALESCE(${sortingState.score}, 0)`));
+    return rows.map((row) => this._mapRowToPhoto(row));
   }
 
   /**
-   * 被写体の写真の選別状態を更新して保存する
-   * filename と shootingDate が一致するエントリのみ更新する
+   * 被写体の写真の選別状態を更新する
+   * filename・shooting_date・actor_id が一致するレコードのみ更新する
    */
   async saveSelectionState(
     actor: string,
@@ -45,17 +64,53 @@ export class LocalAnalysisRepository {
     shootingDate: string,
     state: SelectionState
   ): Promise<void> {
-    const filePath = path.join(this.dataRoot, `${actor}_analysis.json`);
-    const content = await fs.readFile(filePath, "utf-8");
-    const photos: Photo[] = JSON.parse(content);
-    const idx = photos.findIndex(
-      (p) => p.filename === filename && p.shootingDate === shootingDate
-    );
-    if (idx >= 0) {
-      photos[idx].selectionState = state;
-      photos[idx].selectedAt = new Date().toISOString();
-    }
-    await fs.writeFile(filePath, JSON.stringify(photos, null, 2), "utf-8");
+    await this.db
+      .update(sortingState)
+      .set({ selection_state: state, selected_at: sql`NOW()` })
+      .where(
+        and(
+          eq(sortingState.actor_id, actor),
+          eq(sortingState.filename, filename),
+          sql`${sortingState.shooting_date} = ${shootingDate}`
+        )
+      );
+  }
+
+  /**
+   * pending 写真をスコア降順でページネーション取得する
+   * @param actor 被写体ID
+   * @param offset 開始インデックス
+   * @param limit 取得枚数
+   */
+  async getPendingPhotosPage(
+    actor: string,
+    offset: number,
+    limit: number
+  ): Promise<{ photos: Photo[]; hasMore: boolean }> {
+    // hasMore 判定のために limit+1 件取得する
+    const rows = await this.db
+      .select({
+        filename: sortingState.filename,
+        shooting_date: sortingState.shooting_date,
+        score: sortingState.score,
+        selection_state: sortingState.selection_state,
+        selected_at: sortingState.selected_at,
+      })
+      .from(sortingState)
+      .where(
+        and(
+          eq(sortingState.actor_id, actor),
+          eq(sortingState.selection_state, "pending"),
+          eq(sortingState.public, true)
+        )
+      )
+      .orderBy(desc(sql`COALESCE(${sortingState.score}, 0)`))
+      .limit(limit + 1)
+      .offset(offset);
+
+    const hasMore = rows.length > limit;
+    const photos = rows.slice(0, limit).map((row) => this._mapRowToPhoto(row));
+    return { photos, hasMore };
   }
 
   /**
@@ -70,5 +125,37 @@ export class LocalAnalysisRepository {
       throw new Error("Invalid file path");
     }
     return fs.readFile(imagePath);
+  }
+
+  /**
+   * DB の行データを Photo 型にマッピングする
+   * shooting_date・selected_at は Date オブジェクトの場合も文字列に変換する
+   */
+  private _mapRowToPhoto(row: {
+    filename: string;
+    shooting_date: string | Date | null;
+    score: string | null;
+    selection_state: string;
+    selected_at: Date | string | null;
+  }): Photo {
+    const shootingDate =
+      row.shooting_date instanceof Date
+        ? row.shooting_date.toISOString().split("T")[0]
+        : String(row.shooting_date);
+
+    const selectedAt =
+      row.selected_at instanceof Date
+        ? row.selected_at.toISOString()
+        : row.selected_at != null
+        ? String(row.selected_at)
+        : null;
+
+    return {
+      filename: row.filename,
+      shootingDate,
+      score: row.score != null ? Number(row.score) : null,
+      selectionState: row.selection_state as SelectionState,
+      selectedAt,
+    };
   }
 }

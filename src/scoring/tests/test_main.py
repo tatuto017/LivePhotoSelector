@@ -1,8 +1,8 @@
 """src.scoring.main のユニットテスト。"""
 
 import json
-import pickle
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
 import pytest
@@ -12,11 +12,25 @@ from src.scoring.main import (
     ModelTrainer,
     PhotoScorer,
     ScoringRepository,
+    _display_training_result,
     _extract_features,
     _load_env,
     _run_scoring_for_actor,
     run,
 )
+
+# ---------------------------------------------------------------------------
+# テストデータ定数
+# ---------------------------------------------------------------------------
+
+_BASE_ENTRY = {
+    "filename": "img.jpg",
+    "shootingDate": "2026-04-01",
+    "score": None,
+    "selectionState": "pending",
+    "learned": False,
+    "selectedAt": None,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -111,11 +125,32 @@ class TestScoringRepository:
     """ScoringRepository のテスト。"""
 
     def _make_repo(self, tmp_path: Path) -> ScoringRepository:
-        """テスト用リポジトリを生成する。"""
+        """テスト用リポジトリを生成する（mock Engine 使用）。"""
+        mock_engine = MagicMock()
         return ScoringRepository(
-            project_root=tmp_path / "project",
-            one_drive_root=tmp_path / "onedrive",
+            data_root=tmp_path / "project",
+            engine=mock_engine,
         )
+
+    def _make_repo_with_engine(self, tmp_path: Path):
+        """テスト用リポジトリと mock Engine を両方返す。"""
+        mock_engine = MagicMock()
+        repo = ScoringRepository(
+            data_root=tmp_path / "project",
+            engine=mock_engine,
+        )
+        return repo, mock_engine
+
+    def _setup_conn(self, mock_engine, rows=None):
+        """mock Engine に connect() コンテキストマネージャをセットアップする。"""
+        mock_conn = MagicMock()
+        mock_engine.connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+        if rows is not None:
+            mock_result = MagicMock()
+            mock_result.fetchall.return_value = rows
+            mock_conn.execute.return_value = mock_result
+        return mock_conn
 
     def _make_record(self) -> AnalysisRecord:
         """テスト用 AnalysisRecord を生成する。"""
@@ -137,142 +172,182 @@ class TestScoringRepository:
 
     # --- loadRecords ---
 
-    def test_load_records_returns_empty_when_file_not_exists(
+    def test_load_records_returns_empty_when_no_rows(
         self, tmp_path: Path
     ) -> None:
-        """analysis.pki が存在しない場合、空リストを返すこと。"""
-        repo = self._make_repo(tmp_path)
+        """analysis_records テーブルが空の場合、空リストを返すこと。"""
+        repo, mock_engine = self._make_repo_with_engine(tmp_path)
+        self._setup_conn(mock_engine, rows=[])
 
         result = repo.loadRecords()
 
         assert result == []
 
-    def test_load_records_returns_records(self, tmp_path: Path) -> None:
-        """analysis.pki からレコードを読み込めること。"""
-        repo = self._make_repo(tmp_path)
-        records = [self._make_record()]
-        pki_path = tmp_path / "onedrive" / "data" / "analysis.pki"
-        pki_path.parent.mkdir(parents=True)
-        with open(pki_path, "wb") as f:
-            pickle.dump(records, f)
+    def test_load_records_returns_records_from_db(self, tmp_path: Path) -> None:
+        """analysis_records テーブルのレコードを AnalysisRecord に変換して返すこと。"""
+        repo, mock_engine = self._make_repo_with_engine(tmp_path)
+        embedding = [0.1] * 128
+        row = SimpleNamespace(
+            actor="actor_a",
+            filename="img.jpg",
+            shooting_date="2026-04-01",
+            angry=0, fear=0, happy=80, sad=0,
+            surprise=0, disgust=0, neutral=20,
+            face_angle=0.0,
+            is_occluded=0,
+            face_embedding=json.dumps(embedding),
+        )
+        self._setup_conn(mock_engine, rows=[row])
 
         result = repo.loadRecords()
 
         assert len(result) == 1
         assert result[0].actor == "actor_a"
         assert result[0].filename == "img.jpg"
+        assert result[0].face_embedding == embedding
+
+    def test_load_records_executes_select_query(self, tmp_path: Path) -> None:
+        """SELECT クエリが analysis_records テーブルに対して実行されること。"""
+        repo, mock_engine = self._make_repo_with_engine(tmp_path)
+        mock_conn = self._setup_conn(mock_engine, rows=[])
+
+        repo.loadRecords()
+
+        mock_conn.execute.assert_called_once()
 
     # --- getActors ---
 
-    def test_get_actors_returns_empty_when_dir_not_exists(
-        self, tmp_path: Path
-    ) -> None:
-        """data ディレクトリが存在しない場合、空リストを返すこと。"""
-        repo = self._make_repo(tmp_path)
-
-        result = repo.getActors()
-
-        assert result == []
-
-    def test_get_actors_returns_actor_ids(self, tmp_path: Path) -> None:
-        """*_analysis.json のファイル名から被写体 ID 一覧を返すこと。"""
-        repo = self._make_repo(tmp_path)
-        data_dir = tmp_path / "onedrive" / "data"
-        data_dir.mkdir(parents=True)
-        (data_dir / "actor_a_analysis.json").write_text("[]")
-        (data_dir / "actor_b_analysis.json").write_text("[]")
+    def test_get_actors_returns_actor_ids_from_db(self, tmp_path: Path) -> None:
+        """sorting_state テーブルから被写体 ID 一覧を返すこと。"""
+        repo, mock_engine = self._make_repo_with_engine(tmp_path)
+        rows = [
+            SimpleNamespace(actor_id="actor_a"),
+            SimpleNamespace(actor_id="actor_b"),
+        ]
+        self._setup_conn(mock_engine, rows=rows)
 
         result = repo.getActors()
 
         assert result == ["actor_a", "actor_b"]
 
-    def test_get_actors_ignores_non_analysis_json(self, tmp_path: Path) -> None:
-        """*_analysis.json 以外のファイルを無視すること。"""
-        repo = self._make_repo(tmp_path)
-        data_dir = tmp_path / "onedrive" / "data"
-        data_dir.mkdir(parents=True)
-        (data_dir / "actor_a_analysis.json").write_text("[]")
-        (data_dir / "other.json").write_text("{}")
+    def test_get_actors_executes_distinct_query(self, tmp_path: Path) -> None:
+        """DISTINCT actor_id を ORDER BY で取得するクエリが実行されること。"""
+        repo, mock_engine = self._make_repo_with_engine(tmp_path)
+        mock_conn = self._setup_conn(mock_engine, rows=[])
+
+        repo.getActors()
+
+        mock_conn.execute.assert_called_once()
+
+    def test_get_actors_returns_empty_when_no_rows(self, tmp_path: Path) -> None:
+        """テーブルが空の場合、空リストを返すこと。"""
+        repo, mock_engine = self._make_repo_with_engine(tmp_path)
+        self._setup_conn(mock_engine, rows=[])
 
         result = repo.getActors()
 
-        assert result == ["actor_a"]
+        assert result == []
 
     # --- loadActorEntries ---
 
-    def test_load_actor_entries_returns_empty_when_file_not_exists(
-        self, tmp_path: Path
-    ) -> None:
-        """{actor}_analysis.json が存在しない場合、空リストを返すこと。"""
-        repo = self._make_repo(tmp_path)
+    def test_load_actor_entries_returns_dicts_from_db(self, tmp_path: Path) -> None:
+        """sorting_state テーブルから dict リストを返すこと。"""
+        repo, mock_engine = self._make_repo_with_engine(tmp_path)
+        row = SimpleNamespace(
+            filename="img.jpg",
+            shooting_date="2026-04-01",
+            score=0.8,
+            selection_state="ok",
+            learned=False,
+            selected_at=None,
+        )
+        self._setup_conn(mock_engine, rows=[row])
+
+        result = repo.loadActorEntries("actor_a")
+
+        assert len(result) == 1
+        assert result[0]["filename"] == "img.jpg"
+        assert result[0]["score"] == 0.8
+        assert result[0]["selectionState"] == "ok"
+        assert result[0]["learned"] is False
+
+    def test_load_actor_entries_includes_learned_field(self, tmp_path: Path) -> None:
+        """learned フィールドが bool 型で返されること。"""
+        repo, mock_engine = self._make_repo_with_engine(tmp_path)
+        row = SimpleNamespace(
+            filename="img.jpg",
+            shooting_date="2026-04-01",
+            score=None,
+            selection_state="pending",
+            learned=1,
+            selected_at=None,
+        )
+        self._setup_conn(mock_engine, rows=[row])
+
+        result = repo.loadActorEntries("actor_a")
+
+        assert result[0]["learned"] is True
+
+    def test_load_actor_entries_selects_learned_column(self, tmp_path: Path) -> None:
+        """execute が呼ばれること（learned カラムを含む SELECT）。"""
+        repo, mock_engine = self._make_repo_with_engine(tmp_path)
+        mock_conn = self._setup_conn(mock_engine, rows=[])
+
+        repo.loadActorEntries("actor_a")
+
+        mock_conn.execute.assert_called_once()
+
+    def test_load_actor_entries_queries_with_actor_id(self, tmp_path: Path) -> None:
+        """actor_id をパラメータとしてクエリが実行されること。"""
+        repo, mock_engine = self._make_repo_with_engine(tmp_path)
+        mock_conn = self._setup_conn(mock_engine, rows=[])
+
+        repo.loadActorEntries("actor_b")
+
+        mock_conn.execute.assert_called_once()
+
+    def test_load_actor_entries_returns_empty_when_no_rows(self, tmp_path: Path) -> None:
+        """対象 actor のレコードが無い場合、空リストを返すこと。"""
+        repo, mock_engine = self._make_repo_with_engine(tmp_path)
+        self._setup_conn(mock_engine, rows=[])
 
         result = repo.loadActorEntries("actor_a")
 
         assert result == []
 
-    def test_load_actor_entries_returns_raw_dicts(self, tmp_path: Path) -> None:
-        """{actor}_analysis.json から raw dict リストを返すこと。"""
-        repo = self._make_repo(tmp_path)
-        data_dir = tmp_path / "onedrive" / "data"
-        data_dir.mkdir(parents=True)
-        entries = [
-            {
-                "filename": "img.jpg",
-                "shootingDate": "2026-04-01",
-                "score": 0.8,
-                "selectionState": "ok",
-                "selectedAt": None,
-            }
-        ]
-        (data_dir / "actor_a_analysis.json").write_text(json.dumps(entries))
+    # --- updateScore ---
 
-        result = repo.loadActorEntries("actor_a")
+    def test_update_score_executes_update_sql(self, tmp_path: Path) -> None:
+        """UPDATE sorting_state SQL が score と learned を更新すること。"""
+        repo, mock_engine = self._make_repo_with_engine(tmp_path)
+        mock_conn = self._setup_conn(mock_engine)
 
-        assert result == entries
+        repo.updateScore("actor_a", "img001.jpg", "2026-04-01", 0.85)
 
-    # --- saveActorEntries ---
+        mock_conn.execute.assert_called_once()
+        mock_conn.commit.assert_called_once()
 
-    def test_save_actor_entries_creates_dir_and_saves(self, tmp_path: Path) -> None:
-        """ディレクトリが無くても作成して保存できること。"""
-        repo = self._make_repo(tmp_path)
-        entries = [{"filename": "img.jpg", "score": 0.9, "selectionState": "pending"}]
+    def test_update_score_commits_after_execute(self, tmp_path: Path) -> None:
+        """execute 後に commit が呼ばれること。"""
+        repo, mock_engine = self._make_repo_with_engine(tmp_path)
+        mock_conn = self._setup_conn(mock_engine)
 
-        repo.saveActorEntries("actor_a", entries)
+        repo.updateScore("actor_a", "img001.jpg", "2026-04-01", 0.75)
 
-        path = tmp_path / "onedrive" / "data" / "actor_a_analysis.json"
-        assert path.exists()
-        with open(path) as f:
-            saved = json.load(f)
-        assert saved == entries
-
-    def test_save_actor_entries_overwrites_existing(self, tmp_path: Path) -> None:
-        """既存ファイルを上書きできること。"""
-        repo = self._make_repo(tmp_path)
-        data_dir = tmp_path / "onedrive" / "data"
-        data_dir.mkdir(parents=True)
-        (data_dir / "actor_a_analysis.json").write_text(
-            json.dumps([{"filename": "old.jpg"}])
-        )
-
-        new_entries = [{"filename": "new.jpg"}]
-        repo.saveActorEntries("actor_a", new_entries)
-
-        with open(data_dir / "actor_a_analysis.json") as f:
-            saved = json.load(f)
-        assert saved == new_entries
+        mock_conn.commit.assert_called_once_with()
 
     # --- saveModel ---
 
     def test_save_model_calls_joblib_dump(self, tmp_path: Path) -> None:
         """joblib.dump が正しいパスとモデルで呼ばれること。"""
         repo = self._make_repo(tmp_path)
-        (tmp_path / "onedrive" / "data").mkdir(parents=True)
+        (tmp_path / "project").mkdir(parents=True, exist_ok=True)
         model = MagicMock()
 
         with patch("src.scoring.main.joblib.dump") as mock_dump:
             repo.saveModel("actor_a", model)
 
-        expected_path = tmp_path / "onedrive" / "data" / "actor_a_model.joblib"
+        expected_path = tmp_path / "project" / "actor_a_model.joblib"
         mock_dump.assert_called_once_with(model, expected_path)
 
     def test_save_model_creates_dir(self, tmp_path: Path) -> None:
@@ -282,7 +357,28 @@ class TestScoringRepository:
         with patch("src.scoring.main.joblib.dump"):
             repo.saveModel("actor_a", MagicMock())
 
-        assert (tmp_path / "onedrive" / "data").exists()
+        assert (tmp_path / "project").exists()
+
+    # --- markLearned ---
+
+    def test_mark_learned_executes_update_sql(self, tmp_path: Path) -> None:
+        """UPDATE sorting_state で learned = true をセットするクエリが実行されること。"""
+        repo, mock_engine = self._make_repo_with_engine(tmp_path)
+        mock_conn = self._setup_conn(mock_engine)
+
+        repo.markLearned("actor_a", "img001.jpg", "2026-04-01")
+
+        mock_conn.execute.assert_called_once()
+        mock_conn.commit.assert_called_once()
+
+    def test_mark_learned_commits_after_execute(self, tmp_path: Path) -> None:
+        """execute 後に commit が呼ばれること。"""
+        repo, mock_engine = self._make_repo_with_engine(tmp_path)
+        mock_conn = self._setup_conn(mock_engine)
+
+        repo.markLearned("actor_a", "img001.jpg", "2026-04-01")
+
+        mock_conn.commit.assert_called_once_with()
 
 
 # ---------------------------------------------------------------------------
@@ -449,11 +545,12 @@ class TestRun:
         mock_repo.getActors.return_value = []
         mock_trainer = MagicMock()
         mock_scorer = MagicMock()
-        return mock_repo, mock_trainer, mock_scorer
+        mock_engine = MagicMock()
+        return mock_repo, mock_trainer, mock_scorer, mock_engine
 
     def test_calls_load_env(self) -> None:
         """_load_env が呼ばれること。"""
-        mock_repo, mock_trainer, mock_scorer = self._make_mocks()
+        mock_repo, mock_trainer, mock_scorer, mock_engine = self._make_mocks()
 
         with patch("src.scoring.main._load_env") as mock_load_env:
             with patch("src.scoring.main.tqdm", side_effect=lambda x, **kw: x):
@@ -461,34 +558,34 @@ class TestRun:
                     repository=mock_repo,
                     trainer=mock_trainer,
                     scorer=mock_scorer,
-                    project_root=Path("/tmp/proj"),
-                    one_drive_root=Path("/tmp/od"),
+                    data_root=Path("/tmp/proj"),
+                    engine=mock_engine,
                 )
 
         mock_load_env.assert_called_once()
 
     def test_uses_env_vars_when_no_di(self, monkeypatch) -> None:
-        """DI が無い場合、環境変数からパスを取得すること。"""
-        monkeypatch.setenv("PROJECT_ROOT", "/tmp/project")
-        monkeypatch.setenv("ONE_DRIVE_ROOT", "/tmp/onedrive")
+        """DI が無い場合、環境変数からパスを取得し Engine を生成すること。"""
+        monkeypatch.setenv("DATA_ROOT", "/tmp/project")
+        mock_engine = MagicMock()
 
         with patch("src.scoring.main._load_env"):
             with patch("src.scoring.main.tqdm", side_effect=lambda x, **kw: x):
-                with patch("src.scoring.main.ScoringRepository") as mock_repo_cls:
-                    with patch("src.scoring.main.ModelTrainer"):
-                        with patch("src.scoring.main.PhotoScorer"):
-                            mock_repo_cls.return_value.loadRecords.return_value = []
-                            mock_repo_cls.return_value.getActors.return_value = []
+                with patch("src.scoring.main._create_engine", return_value=mock_engine) as mock_create_engine:
+                    with patch("src.scoring.main.ScoringRepository") as mock_repo_cls:
+                        with patch("src.scoring.main.ModelTrainer"):
+                            with patch("src.scoring.main.PhotoScorer"):
+                                mock_repo_cls.return_value.loadRecords.return_value = []
+                                mock_repo_cls.return_value.getActors.return_value = []
 
-                            run()
+                                run()
 
-        mock_repo_cls.assert_called_once_with(
-            Path("/tmp/project"), Path("/tmp/onedrive")
-        )
+        mock_create_engine.assert_called_once()
+        mock_repo_cls.assert_called_once_with(Path("/tmp/project"), mock_engine)
 
     def test_calls_scoring_for_each_actor(self) -> None:
         """各 actor に対して _run_scoring_for_actor が呼ばれること。"""
-        mock_repo, mock_trainer, mock_scorer = self._make_mocks()
+        mock_repo, mock_trainer, mock_scorer, mock_engine = self._make_mocks()
         mock_repo.getActors.return_value = ["actor_a", "actor_b"]
 
         with patch("src.scoring.main._load_env"):
@@ -498,8 +595,8 @@ class TestRun:
                         repository=mock_repo,
                         trainer=mock_trainer,
                         scorer=mock_scorer,
-                        project_root=Path("/tmp/proj"),
-                        one_drive_root=Path("/tmp/od"),
+                        data_root=Path("/tmp/proj"),
+                        engine=mock_engine,
                     )
 
         assert mock_scoring.call_count == 2
@@ -508,7 +605,7 @@ class TestRun:
 
     def test_tqdm_called_with_actors_desc_and_unit(self) -> None:
         """tqdm が actors・desc='Scoring'・unit='actor' で呼ばれること。"""
-        mock_repo, mock_trainer, mock_scorer = self._make_mocks()
+        mock_repo, mock_trainer, mock_scorer, mock_engine = self._make_mocks()
         mock_repo.getActors.return_value = ["actor_a", "actor_b"]
 
         with patch("src.scoring.main._load_env"):
@@ -518,15 +615,15 @@ class TestRun:
                         repository=mock_repo,
                         trainer=mock_trainer,
                         scorer=mock_scorer,
-                        project_root=Path("/tmp/proj"),
-                        one_drive_root=Path("/tmp/od"),
+                        data_root=Path("/tmp/proj"),
+                        engine=mock_engine,
                     )
 
         mock_tqdm.assert_called_once_with(["actor_a", "actor_b"], desc="Scoring", unit="actor")
 
     def test_loads_records_and_builds_record_map(self) -> None:
         """loadRecords が呼ばれ、record_map が構築されること。"""
-        mock_repo, mock_trainer, mock_scorer = self._make_mocks()
+        mock_repo, mock_trainer, mock_scorer, mock_engine = self._make_mocks()
         record = AnalysisRecord(
             actor="actor_a",
             filename="img.jpg",
@@ -559,8 +656,8 @@ class TestRun:
                         repository=mock_repo,
                         trainer=mock_trainer,
                         scorer=mock_scorer,
-                        project_root=Path("/tmp/proj"),
-                        one_drive_root=Path("/tmp/od"),
+                        data_root=Path("/tmp/proj"),
+                        engine=mock_engine,
                     )
 
         assert ("actor_a", "img.jpg") in captured_record_map
@@ -595,25 +692,15 @@ class TestRunScoringForActor:
             face_embedding=[0.1] * 128,
         )
 
-    def _make_repo(self, tmp_path: Path) -> ScoringRepository:
-        """テスト用リポジトリを生成する。"""
-        return ScoringRepository(
-            project_root=tmp_path / "project",
-            one_drive_root=tmp_path / "onedrive",
-        )
-
-    def _write_actor_entries(
-        self, tmp_path: Path, actor: str, entries: list
-    ) -> None:
-        """テスト用 {actor}_analysis.json を書き込む。"""
-        data_dir = tmp_path / "onedrive" / "data"
-        data_dir.mkdir(parents=True, exist_ok=True)
-        with open(data_dir / f"{actor}_analysis.json", "w") as f:
-            json.dump(entries, f)
+    def _make_mock_repo(self, entries: list) -> MagicMock:
+        """loadActorEntries が entries を返す mock リポジトリを生成する。"""
+        repo = MagicMock(spec=ScoringRepository)
+        repo.loadActorEntries.return_value = entries
+        return repo
 
     # --- 学習なし ---
 
-    def test_skips_training_when_no_labeled_entries(self, tmp_path: Path) -> None:
+    def test_skips_training_when_no_labeled_entries(self) -> None:
         """labeled エントリが無い場合、学習・スコアリングがスキップされること。"""
         entries = [
             {
@@ -621,16 +708,16 @@ class TestRunScoringForActor:
                 "shootingDate": "2026-04-01",
                 "score": None,
                 "selectionState": "pending",
+                "learned": False,
                 "selectedAt": None,
             }
         ]
-        self._write_actor_entries(tmp_path, "actor_a", entries)
         mock_trainer = MagicMock()
         mock_scorer = MagicMock()
 
         _run_scoring_for_actor(
             "actor_a",
-            self._make_repo(tmp_path),
+            self._make_mock_repo(entries),
             mock_trainer,
             mock_scorer,
             {},
@@ -639,7 +726,7 @@ class TestRunScoringForActor:
         mock_trainer.train.assert_not_called()
         mock_scorer.score.assert_not_called()
 
-    def test_skips_training_when_single_class_labels(self, tmp_path: Path) -> None:
+    def test_skips_training_when_single_class_labels(self) -> None:
         """labeled エントリが単一クラスのみの場合、学習がスキップされること。"""
         entries = [
             {
@@ -647,6 +734,7 @@ class TestRunScoringForActor:
                 "shootingDate": "2026-04-01",
                 "score": 0.8,
                 "selectionState": "ok",
+                "learned": False,
                 "selectedAt": None,
             },
             {
@@ -654,17 +742,17 @@ class TestRunScoringForActor:
                 "shootingDate": "2026-04-01",
                 "score": None,
                 "selectionState": "pending",
+                "learned": False,
                 "selectedAt": None,
             },
         ]
-        self._write_actor_entries(tmp_path, "actor_a", entries)
         record_map = {("actor_a", "img1.jpg"): self._make_record("img1.jpg")}
         mock_trainer = MagicMock()
         mock_scorer = MagicMock()
 
         _run_scoring_for_actor(
             "actor_a",
-            self._make_repo(tmp_path),
+            self._make_mock_repo(entries),
             mock_trainer,
             mock_scorer,
             record_map,
@@ -673,9 +761,7 @@ class TestRunScoringForActor:
         mock_trainer.train.assert_not_called()
         mock_scorer.score.assert_not_called()
 
-    def test_skips_training_when_no_matching_records_in_pki(
-        self, tmp_path: Path
-    ) -> None:
+    def test_skips_training_when_no_matching_records_in_pki(self) -> None:
         """labeled エントリが analysis.pki に存在しない場合、学習がスキップされること。"""
         entries = [
             {
@@ -683,6 +769,7 @@ class TestRunScoringForActor:
                 "shootingDate": "2026-04-01",
                 "score": 0.8,
                 "selectionState": "ok",
+                "learned": False,
                 "selectedAt": None,
             },
             {
@@ -690,17 +777,17 @@ class TestRunScoringForActor:
                 "shootingDate": "2026-04-01",
                 "score": 0.2,
                 "selectionState": "ng",
+                "learned": False,
                 "selectedAt": None,
             },
         ]
-        self._write_actor_entries(tmp_path, "actor_a", entries)
         mock_trainer = MagicMock()
         mock_scorer = MagicMock()
 
         # record_map が空 → マッチするレコードなし
         _run_scoring_for_actor(
             "actor_a",
-            self._make_repo(tmp_path),
+            self._make_mock_repo(entries),
             mock_trainer,
             mock_scorer,
             {},
@@ -711,7 +798,7 @@ class TestRunScoringForActor:
 
     # --- 学習あり ---
 
-    def test_trains_with_labeled_entries(self, tmp_path: Path) -> None:
+    def test_trains_with_labeled_entries(self) -> None:
         """ok/ng の labeled エントリとレコードが揃っている場合、学習が実行されること。"""
         entries = [
             {
@@ -719,6 +806,7 @@ class TestRunScoringForActor:
                 "shootingDate": "2026-04-01",
                 "score": 0.8,
                 "selectionState": "ok",
+                "learned": False,
                 "selectedAt": None,
             },
             {
@@ -726,33 +814,32 @@ class TestRunScoringForActor:
                 "shootingDate": "2026-04-01",
                 "score": 0.2,
                 "selectionState": "ng",
+                "learned": False,
                 "selectedAt": None,
             },
         ]
-        self._write_actor_entries(tmp_path, "actor_a", entries)
         record_map = {
             ("actor_a", "ok.jpg"): self._make_record("ok.jpg"),
             ("actor_a", "ng.jpg"): self._make_record("ng.jpg"),
         }
         mock_trainer = MagicMock()
         mock_scorer = MagicMock()
+        repo = self._make_mock_repo(entries)
 
-        repo = self._make_repo(tmp_path)
-        with patch.object(repo, "saveModel"):
-            _run_scoring_for_actor(
-                "actor_a",
-                repo,
-                mock_trainer,
-                mock_scorer,
-                record_map,
-            )
+        _run_scoring_for_actor(
+            "actor_a",
+            repo,
+            mock_trainer,
+            mock_scorer,
+            record_map,
+        )
 
         mock_trainer.train.assert_called_once()
         features, labels = mock_trainer.train.call_args.args
         assert len(features) == 2
         assert set(labels) == {0, 1}
 
-    def test_train_receives_correct_labels(self, tmp_path: Path) -> None:
+    def test_train_receives_correct_labels(self) -> None:
         """ok=1 / ng=0 のラベルで学習が呼ばれること。"""
         entries = [
             {
@@ -760,6 +847,7 @@ class TestRunScoringForActor:
                 "shootingDate": "2026-04-01",
                 "score": 0.8,
                 "selectionState": "ok",
+                "learned": False,
                 "selectedAt": None,
             },
             {
@@ -767,39 +855,39 @@ class TestRunScoringForActor:
                 "shootingDate": "2026-04-01",
                 "score": 0.2,
                 "selectionState": "ng",
+                "learned": False,
                 "selectedAt": None,
             },
         ]
-        self._write_actor_entries(tmp_path, "actor_a", entries)
         record_map = {
             ("actor_a", "ok.jpg"): self._make_record("ok.jpg"),
             ("actor_a", "ng.jpg"): self._make_record("ng.jpg"),
         }
         mock_trainer = MagicMock()
         mock_scorer = MagicMock()
+        repo = self._make_mock_repo(entries)
 
-        repo = self._make_repo(tmp_path)
-        with patch.object(repo, "saveModel"):
-            _run_scoring_for_actor(
-                "actor_a",
-                repo,
-                mock_trainer,
-                mock_scorer,
-                record_map,
-            )
+        _run_scoring_for_actor(
+            "actor_a",
+            repo,
+            mock_trainer,
+            mock_scorer,
+            record_map,
+        )
 
         _, labels = mock_trainer.train.call_args.args
         assert 1 in labels  # ok → 1
         assert 0 in labels  # ng → 0
 
-    def test_scores_pending_entries(self, tmp_path: Path) -> None:
-        """pending エントリがスコアリングされること。"""
+    def test_scores_pending_entries_and_calls_update_score(self) -> None:
+        """pending エントリがスコアリングされ、updateScore が呼ばれること。"""
         entries = [
             {
                 "filename": "ok.jpg",
                 "shootingDate": "2026-04-01",
                 "score": 0.8,
                 "selectionState": "ok",
+                "learned": False,
                 "selectedAt": None,
             },
             {
@@ -807,6 +895,7 @@ class TestRunScoringForActor:
                 "shootingDate": "2026-04-01",
                 "score": 0.2,
                 "selectionState": "ng",
+                "learned": False,
                 "selectedAt": None,
             },
             {
@@ -814,10 +903,10 @@ class TestRunScoringForActor:
                 "shootingDate": "2026-04-01",
                 "score": None,
                 "selectionState": "pending",
+                "learned": False,
                 "selectedAt": None,
             },
         ]
-        self._write_actor_entries(tmp_path, "actor_a", entries)
         record_map = {
             ("actor_a", "ok.jpg"): self._make_record("ok.jpg"),
             ("actor_a", "ng.jpg"): self._make_record("ng.jpg"),
@@ -828,28 +917,26 @@ class TestRunScoringForActor:
         mock_trainer.train.return_value = mock_model
         mock_scorer = MagicMock()
         mock_scorer.score.return_value = [0.75]
+        repo = self._make_mock_repo(entries)
 
-        repo = self._make_repo(tmp_path)
-        with patch.object(repo, "saveModel"):
-            _run_scoring_for_actor(
-                "actor_a", repo, mock_trainer, mock_scorer, record_map
-            )
+        _run_scoring_for_actor(
+            "actor_a", repo, mock_trainer, mock_scorer, record_map
+        )
 
         mock_scorer.score.assert_called_once()
-        saved = repo.loadActorEntries("actor_a")
-        pending_entry = next(e for e in saved if e["filename"] == "pending.jpg")
-        assert pending_entry["score"] == 0.75
+        repo.updateScore.assert_called_once_with(
+            "actor_a", "pending.jpg", "2026-04-01", 0.75
+        )
 
-    def test_skips_scoring_when_no_pending_records_in_pki(
-        self, tmp_path: Path
-    ) -> None:
-        """pending エントリが analysis.pki に存在しない場合、スコアリングがスキップされること。"""
+    def test_update_score_not_called_for_labeled_entries(self) -> None:
+        """labeled エントリに対して updateScore が呼ばれないこと。"""
         entries = [
             {
                 "filename": "ok.jpg",
                 "shootingDate": "2026-04-01",
                 "score": 0.8,
                 "selectionState": "ok",
+                "learned": False,
                 "selectedAt": None,
             },
             {
@@ -857,6 +944,39 @@ class TestRunScoringForActor:
                 "shootingDate": "2026-04-01",
                 "score": 0.2,
                 "selectionState": "ng",
+                "learned": False,
+                "selectedAt": None,
+            },
+        ]
+        record_map = {
+            ("actor_a", "ok.jpg"): self._make_record("ok.jpg"),
+            ("actor_a", "ng.jpg"): self._make_record("ng.jpg"),
+        }
+        repo = self._make_mock_repo(entries)
+
+        _run_scoring_for_actor(
+            "actor_a", repo, MagicMock(), MagicMock(), record_map
+        )
+
+        repo.updateScore.assert_not_called()
+
+    def test_skips_scoring_when_no_pending_records_in_pki(self) -> None:
+        """pending エントリが analysis.pki に存在しない場合、スコアリングがスキップされること。"""
+        entries = [
+            {
+                "filename": "ok.jpg",
+                "shootingDate": "2026-04-01",
+                "score": 0.8,
+                "selectionState": "ok",
+                "learned": False,
+                "selectedAt": None,
+            },
+            {
+                "filename": "ng.jpg",
+                "shootingDate": "2026-04-01",
+                "score": 0.2,
+                "selectionState": "ng",
+                "learned": False,
                 "selectedAt": None,
             },
             {
@@ -864,10 +984,10 @@ class TestRunScoringForActor:
                 "shootingDate": "2026-04-01",
                 "score": None,
                 "selectionState": "pending",
+                "learned": False,
                 "selectedAt": None,
             },
         ]
-        self._write_actor_entries(tmp_path, "actor_a", entries)
         # pending.jpg のレコードなし
         record_map = {
             ("actor_a", "ok.jpg"): self._make_record("ok.jpg"),
@@ -877,52 +997,19 @@ class TestRunScoringForActor:
         mock_model = MagicMock()
         mock_trainer.train.return_value = mock_model
         mock_scorer = MagicMock()
+        repo = self._make_mock_repo(entries)
 
-        repo = self._make_repo(tmp_path)
-        with patch.object(repo, "saveModel"):
-            _run_scoring_for_actor(
-                "actor_a",
-                repo,
-                mock_trainer,
-                mock_scorer,
-                record_map,
-            )
+        _run_scoring_for_actor(
+            "actor_a",
+            repo,
+            mock_trainer,
+            mock_scorer,
+            record_map,
+        )
 
         mock_scorer.score.assert_not_called()
 
-    # --- ファイル保存 ---
-
-    def test_keeps_labeled_entries_in_actor_json(self, tmp_path: Path) -> None:
-        """labeled エントリが {actor}_analysis.json に残ること。"""
-        entries = [
-            {
-                "filename": "ok.jpg",
-                "shootingDate": "2026-04-01",
-                "score": 0.8,
-                "selectionState": "ok",
-                "selectedAt": None,
-            },
-            {
-                "filename": "pending.jpg",
-                "shootingDate": "2026-04-01",
-                "score": None,
-                "selectionState": "pending",
-                "selectedAt": None,
-            },
-        ]
-        self._write_actor_entries(tmp_path, "actor_a", entries)
-
-        repo = self._make_repo(tmp_path)
-        _run_scoring_for_actor(
-            "actor_a", repo, MagicMock(), MagicMock(), {}
-        )
-
-        saved = repo.loadActorEntries("actor_a")
-        filenames = [e["filename"] for e in saved]
-        assert "ok.jpg" in filenames
-        assert "pending.jpg" in filenames
-
-    def test_saves_model_when_training_succeeds(self, tmp_path: Path) -> None:
+    def test_saves_model_when_training_succeeds(self) -> None:
         """学習成功時に saveModel が正しい引数で呼ばれること。"""
         entries = [
             {
@@ -930,6 +1017,7 @@ class TestRunScoringForActor:
                 "shootingDate": "2026-04-01",
                 "score": 0.8,
                 "selectionState": "ok",
+                "learned": False,
                 "selectedAt": None,
             },
             {
@@ -937,10 +1025,10 @@ class TestRunScoringForActor:
                 "shootingDate": "2026-04-01",
                 "score": 0.2,
                 "selectionState": "ng",
+                "learned": False,
                 "selectedAt": None,
             },
         ]
-        self._write_actor_entries(tmp_path, "actor_a", entries)
         record_map = {
             ("actor_a", "ok.jpg"): self._make_record("ok.jpg"),
             ("actor_a", "ng.jpg"): self._make_record("ng.jpg"),
@@ -948,26 +1036,25 @@ class TestRunScoringForActor:
         mock_model = MagicMock()
         mock_trainer = MagicMock()
         mock_trainer.train.return_value = mock_model
+        repo = self._make_mock_repo(entries)
 
-        repo = self._make_repo(tmp_path)
-        with patch.object(repo, "saveModel") as mock_save_model:
-            _run_scoring_for_actor(
-                "actor_a", repo, mock_trainer, MagicMock(), record_map
-            )
+        _run_scoring_for_actor(
+            "actor_a", repo, mock_trainer, MagicMock(), record_map
+        )
 
-        mock_save_model.assert_called_once_with("actor_a", mock_model)
+        repo.saveModel.assert_called_once_with("actor_a", mock_model)
 
-    # --- diff マージ ---
+    # --- 学習結果表示 ---
 
-    def test_merges_score_only_when_pi_changed_file(self, tmp_path: Path) -> None:
-        """Pi が selectionState を書き換えた場合、score のみ更新して他フィールドを保持すること。"""
-        # スナップショット: pending.jpg は pending
-        snapshot_entries = [
+    def test_display_training_result_called_after_training(self) -> None:
+        """学習成功時に _display_training_result が正しい引数で呼ばれること。"""
+        entries = [
             {
                 "filename": "ok.jpg",
                 "shootingDate": "2026-04-01",
                 "score": 0.8,
                 "selectionState": "ok",
+                "learned": False,
                 "selectedAt": None,
             },
             {
@@ -975,75 +1062,83 @@ class TestRunScoringForActor:
                 "shootingDate": "2026-04-01",
                 "score": 0.2,
                 "selectionState": "ng",
+                "learned": False,
                 "selectedAt": None,
             },
+        ]
+        record_map = {
+            ("actor_a", "ok.jpg"): self._make_record("ok.jpg"),
+            ("actor_a", "ng.jpg"): self._make_record("ng.jpg"),
+        }
+        mock_model = MagicMock()
+        mock_model.score.return_value = 0.95
+        mock_trainer = MagicMock()
+        mock_trainer.train.return_value = mock_model
+        repo = self._make_mock_repo(entries)
+
+        with patch("src.scoring.main._display_training_result") as mock_display:
+            _run_scoring_for_actor(
+                "actor_a", repo, mock_trainer, MagicMock(), record_map
+            )
+
+        mock_display.assert_called_once_with("actor_a", 1, 1, 0.95)
+
+    def test_display_training_result_not_called_when_no_training(self) -> None:
+        """学習がスキップされた場合は _display_training_result が呼ばれないこと。"""
+        entries = [
             {
                 "filename": "pending.jpg",
                 "shootingDate": "2026-04-01",
                 "score": None,
                 "selectionState": "pending",
+                "learned": False,
                 "selectedAt": None,
-            },
+            }
         ]
-        # current: Pi が pending.jpg を ok に変更
-        current_entries = [
-            {
-                "filename": "ok.jpg",
-                "shootingDate": "2026-04-01",
-                "score": 0.8,
-                "selectionState": "ok",
-                "selectedAt": None,
-            },
-            {
-                "filename": "ng.jpg",
-                "shootingDate": "2026-04-01",
-                "score": 0.2,
-                "selectionState": "ng",
-                "selectedAt": None,
-            },
-            {
-                "filename": "pending.jpg",
-                "shootingDate": "2026-04-01",
-                "score": None,
-                "selectionState": "ok",
-                "selectedAt": "2026-04-10T00:00:00.000Z",
-            },
-        ]
-        record_map = {
-            ("actor_a", "ok.jpg"): self._make_record("ok.jpg"),
-            ("actor_a", "ng.jpg"): self._make_record("ng.jpg"),
-            ("actor_a", "pending.jpg"): self._make_record("pending.jpg"),
-        }
+        repo = self._make_mock_repo(entries)
 
-        repo = self._make_repo(tmp_path)
-        mock_trainer = MagicMock()
-        mock_model = MagicMock()
-        mock_trainer.train.return_value = mock_model
-        mock_scorer = MagicMock()
-        mock_scorer.score.return_value = [0.9]
+        with patch("src.scoring.main._display_training_result") as mock_display:
+            _run_scoring_for_actor(
+                "actor_a",
+                repo,
+                MagicMock(),
+                MagicMock(),
+                {},
+            )
 
-        # 1 回目の loadActorEntries → snapshot、2 回目 → current
-        mock_load = MagicMock(side_effect=[snapshot_entries, current_entries])
-        mock_save = MagicMock()
-        repo.loadActorEntries = mock_load
-        repo.saveActorEntries = mock_save
-        repo.saveModel = MagicMock()
+        mock_display.assert_not_called()
 
-        _run_scoring_for_actor(
-            "actor_a", repo, mock_trainer, mock_scorer, record_map
-        )
 
-        saved_entries = mock_save.call_args.args[1]
-        # 全エントリが保存されること
-        filenames_saved = [e["filename"] for e in saved_entries]
-        assert "ok.jpg" in filenames_saved
-        assert "ng.jpg" in filenames_saved
-        assert "pending.jpg" in filenames_saved
-        pending_entry = next(
-            e for e in saved_entries if e["filename"] == "pending.jpg"
-        )
-        # Pi の selectionState/selectedAt 変更は保持
-        assert pending_entry["selectionState"] == "ok"
-        assert pending_entry["selectedAt"] == "2026-04-10T00:00:00.000Z"
-        # score は更新
-        assert pending_entry["score"] == 0.9
+# ---------------------------------------------------------------------------
+# _display_training_result
+# ---------------------------------------------------------------------------
+
+
+class TestDisplayTrainingResult:
+    """_display_training_result のテスト。"""
+
+    def test_prints_actor_ok_ng_accuracy(self, capsys) -> None:
+        """actor・ok 数・ng 数・精度が出力されること。"""
+        _display_training_result("actor_a", 10, 5, 0.9333)
+
+        captured = capsys.readouterr()
+        assert "actor_a" in captured.out
+        assert "ok=10" in captured.out
+        assert "ng=5" in captured.out
+        assert "train_accuracy=0.9333" in captured.out
+
+    def test_accuracy_formatted_to_4_decimal_places(self, capsys) -> None:
+        """精度が小数点以下 4 桁でフォーマットされること。"""
+        _display_training_result("actor_b", 3, 2, 0.666666)
+
+        captured = capsys.readouterr()
+        assert "0.6667" in captured.out
+
+    def test_zero_samples_displayed(self, capsys) -> None:
+        """ok=0 / ng=0 でもクラッシュせず表示されること。"""
+        _display_training_result("actor_c", 0, 0, 0.0)
+
+        captured = capsys.readouterr()
+        assert "ok=0" in captured.out
+        assert "ng=0" in captured.out
+        assert "0.0000" in captured.out

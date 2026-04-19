@@ -2,9 +2,9 @@
 
 import json
 import math
-import pickle
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
 import pytest
@@ -14,7 +14,6 @@ from src.analysis.main import (
     AnalysisRecord,
     AnalysisRepository,
     PhotoAnalyzer,
-    PhotoMover,
     _calculate_face_angle,
     _get_shooting_date,
     _load_env,
@@ -24,6 +23,7 @@ from src.analysis.main import (
     main,
     run,
 )
+from concurrent.futures import Future
 
 
 # ---------------------------------------------------------------------------
@@ -159,165 +159,235 @@ class TestCalculateFaceAngle:
 class TestAnalysisRepository:
     """AnalysisRepository のテスト。"""
 
-    def _make_repo(self, tmp_path: Path) -> AnalysisRepository:
-        """テスト用のリポジトリを生成する。"""
-        return AnalysisRepository(
-            project_root=tmp_path / "project",
-            one_drive_root=tmp_path / "onedrive",
-        )
+    def _make_repo_with_engine(self):
+        """テスト用のリポジトリと mock Engine を両方返す。"""
+        mock_engine = MagicMock()
+        return AnalysisRepository(engine=mock_engine), mock_engine
+
+    def _setup_conn(self, mock_engine, rows=None):
+        """mock Engine に connect() コンテキストマネージャをセットアップする。"""
+        mock_conn = MagicMock()
+        mock_engine.connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+        if rows is not None:
+            mock_result = MagicMock()
+            mock_result.fetchall.return_value = rows
+            mock_conn.execute.return_value = mock_result
+        return mock_conn
 
     # --- loadRecords ---
 
-    def test_load_records_returns_empty_when_file_not_exists(self, tmp_path: Path) -> None:
-        """analysis.pki が存在しない場合、空リストを返すこと。"""
-        repo = self._make_repo(tmp_path)
-        result = repo.loadRecords()
-        assert result == []
-
-    def test_load_records_returns_records_from_file(self, tmp_path: Path) -> None:
-        """analysis.pki が存在する場合、レコードを返すこと。"""
-        repo = self._make_repo(tmp_path)
-        records = [AnalysisRecord("a", "img.jpg", "2026-04-01", 0, 0, 80, 0, 0, 0, 20, 0.0, False, [0.1] * 128)]
-
-        pki_path = tmp_path / "onedrive" / "data" / "analysis.pki"
-        pki_path.parent.mkdir(parents=True)
-        with open(pki_path, "wb") as f:
-            pickle.dump(records, f)
+    def test_load_records_returns_empty_when_no_rows(self) -> None:
+        """analysis_records テーブルが空の場合、空リストを返すこと。"""
+        repo, mock_engine = self._make_repo_with_engine()
+        self._setup_conn(mock_engine, rows=[])
 
         result = repo.loadRecords()
-        assert len(result) == 1
-        assert result[0].actor == "a"
-        assert result[0].filename == "img.jpg"
 
-    # --- saveRecords ---
-
-    def test_save_records_creates_dir_and_saves(self, tmp_path: Path) -> None:
-        """ディレクトリが無くても作成して保存できること。"""
-        repo = self._make_repo(tmp_path)
-        records = [AnalysisRecord("a", "img.jpg", "2026-04-01", 0, 0, 80, 0, 0, 0, 20, 0.0, False, [0.1] * 128)]
-
-        repo.saveRecords(records)
-
-        pki_path = tmp_path / "onedrive" / "data" / "analysis.pki"
-        assert pki_path.exists()
-        with open(pki_path, "rb") as f:
-            loaded = pickle.load(f)
-        assert len(loaded) == 1
-        assert loaded[0].filename == "img.jpg"
-
-    def test_save_records_writes_atomically(self, tmp_path: Path) -> None:
-        """アトミック書き込み（一時ファイル→リネーム）で保存されること。"""
-        repo = self._make_repo(tmp_path)
-        records = [AnalysisRecord("a", "img.jpg", "2026-04-01", 0, 0, 80, 0, 0, 0, 20, 0.0, False, [0.1] * 128)]
-
-        with patch("src.analysis.main.shutil.move") as mock_move:
-            with patch("src.analysis.main.tempfile.NamedTemporaryFile") as mock_tmp:
-                mock_tmp.return_value.__enter__ = MagicMock(return_value=MagicMock(name="/tmp/tmp_abc"))
-                mock_tmp.return_value.__exit__ = MagicMock(return_value=False)
-                mock_tmp.return_value.__enter__.return_value.name = "/tmp/tmp_abc"
-                repo.saveRecords(records)
-
-        mock_move.assert_called_once()
-
-    # --- loadActorEntries ---
-
-    def test_load_actor_entries_returns_empty_when_file_not_exists(self, tmp_path: Path) -> None:
-        """{actor}_analysis.json が存在しない場合、空リストを返すこと。"""
-        repo = self._make_repo(tmp_path)
-        result = repo.loadActorEntries("actor_a")
         assert result == []
 
-    def test_load_actor_entries_returns_empty_when_file_is_corrupted(
-        self, tmp_path: Path
-    ) -> None:
-        """JSON が破損している場合、空リストを返して警告を出すこと。"""
-        data_dir = tmp_path / "onedrive" / "data"
-        data_dir.mkdir(parents=True)
-        (data_dir / "actor_a_analysis.json").write_text(
-            '[{"filename": "img.jpg", "broken":', encoding="utf-8"
+    def test_load_records_returns_records_from_db(self) -> None:
+        """analysis_records テーブルのレコードを AnalysisRecord に変換して返すこと。"""
+        repo, mock_engine = self._make_repo_with_engine()
+        embedding = [0.1] * 128
+        row = SimpleNamespace(
+            actor="actor_a",
+            filename="img.jpg",
+            shooting_date="2026-04-01",
+            angry=5.0, fear=2.0, happy=80.0, sad=3.0,
+            surprise=4.0, disgust=1.0, neutral=5.0,
+            face_angle=1.5,
+            is_occluded=0,
+            face_embedding=json.dumps(embedding),
         )
-        repo = self._make_repo(tmp_path)
+        self._setup_conn(mock_engine, rows=[row])
 
-        result = repo.loadActorEntries("actor_a")
+        result = repo.loadRecords()
 
-        assert result == []
-
-    def test_load_actor_entries_returns_entries_from_file(self, tmp_path: Path) -> None:
-        """{actor}_analysis.json が存在する場合、エントリを返すこと。"""
-        repo = self._make_repo(tmp_path)
-        data_dir = tmp_path / "onedrive" / "data"
-        data_dir.mkdir(parents=True)
-
-        data = [
-            {
-                "filename": "img001.jpg",
-                "shootingDate": "2026-04-01",
-                "score": 0.8,
-                "selectionState": "ok",
-                "selectedAt": "2026-04-06T12:00:00.000Z",
-            }
-        ]
-        with open(data_dir / "actor_a_analysis.json", "w") as f:
-            json.dump(data, f)
-
-        result = repo.loadActorEntries("actor_a")
         assert len(result) == 1
-        assert result[0].filename == "img001.jpg"
-        assert result[0].score == 0.8
-        assert result[0].selectionState == "ok"
+        assert result[0].actor == "actor_a"
+        assert result[0].filename == "img.jpg"
+        assert result[0].shootingDate == "2026-04-01"
+        assert result[0].happy == 80.0
+        assert result[0].faceAngle == 1.5
+        assert result[0].isOccluded is False
+        assert result[0].face_embedding == embedding
 
-    # --- saveActorEntries ---
+    def test_load_records_executes_select_query(self) -> None:
+        """SELECT クエリが analysis_records テーブルに対して実行されること。"""
+        repo, mock_engine = self._make_repo_with_engine()
+        mock_conn = self._setup_conn(mock_engine, rows=[])
 
-    def test_save_actor_entries_creates_dir_and_saves(self, tmp_path: Path) -> None:
-        """ディレクトリが無くても作成して保存できること。"""
-        repo = self._make_repo(tmp_path)
-        entries = [
-            AnalysisEntry(
-                filename="img001.jpg",
-                shootingDate="2026-04-01",
-                score=0.9,
-                selectionState="pending",
-                selectedAt=None,
-            )
+        repo.loadRecords()
+
+        mock_conn.execute.assert_called_once()
+
+    def test_load_records_deserializes_is_occluded_as_bool(self) -> None:
+        """is_occluded が TINYINT(1)=1 の場合、True に変換されること。"""
+        repo, mock_engine = self._make_repo_with_engine()
+        row = SimpleNamespace(
+            actor="a", filename="img.jpg", shooting_date="2026-04-01",
+            angry=0, fear=0, happy=0, sad=0, surprise=0,
+            disgust=0, neutral=100, face_angle=0.0,
+            is_occluded=1,
+            face_embedding=json.dumps([0.0] * 128),
+        )
+        self._setup_conn(mock_engine, rows=[row])
+
+        result = repo.loadRecords()
+
+        assert result[0].isOccluded is True
+
+    # --- loadProcessedKeys ---
+
+    def test_load_processed_keys_returns_set_of_tuples(self) -> None:
+        """sorting_state から (actor_id, filename) のセットを返すこと。"""
+        repo, mock_engine = self._make_repo_with_engine()
+        rows = [
+            SimpleNamespace(actor_id="actor_a", filename="img001.jpg"),
+            SimpleNamespace(actor_id="actor_b", filename="img002.jpg"),
         ]
+        self._setup_conn(mock_engine, rows=rows)
 
-        repo.saveActorEntries("actor_a", entries)
+        result = repo.loadProcessedKeys()
 
-        path = tmp_path / "onedrive" / "data" / "actor_a_analysis.json"
-        assert path.exists()
-        with open(path, "r") as f:
-            saved = json.load(f)
-        assert len(saved) == 1
-        assert saved[0]["filename"] == "img001.jpg"
-        assert saved[0]["score"] == 0.9
-        assert saved[0]["selectedAt"] is None
+        assert result == {("actor_a", "img001.jpg"), ("actor_b", "img002.jpg")}
 
-    def test_save_actor_entries_writes_atomically(self, tmp_path: Path) -> None:
-        """アトミック書き込み（一時ファイル→リネーム）で保存されること。"""
-        repo = self._make_repo(tmp_path)
-        entries = [AnalysisEntry(filename="img.jpg", shootingDate="2026-04-01")]
+    def test_load_processed_keys_returns_empty_set_when_no_rows(self) -> None:
+        """sorting_state が空の場合、空セットを返すこと。"""
+        repo, mock_engine = self._make_repo_with_engine()
+        self._setup_conn(mock_engine, rows=[])
 
-        with patch("src.analysis.main.shutil.move") as mock_move:
-            with patch("src.analysis.main.tempfile.NamedTemporaryFile") as mock_tmp:
-                mock_tmp.return_value.__enter__ = MagicMock(return_value=MagicMock(name="/tmp/tmp_abc"))
-                mock_tmp.return_value.__exit__ = MagicMock(return_value=False)
-                mock_tmp.return_value.__enter__.return_value.name = "/tmp/tmp_abc"
-                repo.saveActorEntries("actor_a", entries)
+        result = repo.loadProcessedKeys()
 
-        mock_move.assert_called_once()
+        assert result == set()
 
-    def test_save_actor_entries_serializes_none_fields(self, tmp_path: Path) -> None:
-        """score・selectedAt が None でも正しく保存されること。"""
-        repo = self._make_repo(tmp_path)
-        entries = [AnalysisEntry(filename="img.jpg", shootingDate="2026-04-01")]
+    def test_load_processed_keys_executes_select_on_sorting_state(self) -> None:
+        """sorting_state テーブルに対して SELECT が実行されること。"""
+        repo, mock_engine = self._make_repo_with_engine()
+        mock_conn = self._setup_conn(mock_engine, rows=[])
 
-        repo.saveActorEntries("actor_a", entries)
+        repo.loadProcessedKeys()
 
-        path = tmp_path / "onedrive" / "data" / "actor_a_analysis.json"
-        with open(path, "r") as f:
-            saved = json.load(f)
-        assert saved[0]["score"] is None
-        assert saved[0]["selectedAt"] is None
+        mock_conn.execute.assert_called_once()
+
+    # --- insertRecord ---
+
+    def test_insert_record_executes_insert_ignore_sql(self) -> None:
+        """INSERT IGNORE INTO analysis_records が実行されること。"""
+        repo, mock_engine = self._make_repo_with_engine()
+        mock_conn = self._setup_conn(mock_engine)
+
+        record = AnalysisRecord(
+            actor="actor_a", filename="img001.jpg", shootingDate="2026-04-01",
+            angry=5.0, fear=2.0, happy=80.0, sad=3.0, surprise=4.0,
+            disgust=1.0, neutral=5.0, faceAngle=1.5,
+            isOccluded=False, face_embedding=[0.1] * 128,
+        )
+        repo.insertRecord(record)
+
+        mock_conn.execute.assert_called_once()
+
+    def test_insert_record_passes_correct_params(self) -> None:
+        """全フィールドが正しい型で INSERT されること。"""
+        repo, mock_engine = self._make_repo_with_engine()
+        mock_conn = self._setup_conn(mock_engine)
+        embedding = [0.1] * 128
+
+        record = AnalysisRecord(
+            actor="actor_a", filename="img001.jpg", shootingDate="2026-04-01",
+            angry=5.0, fear=2.0, happy=80.0, sad=3.0, surprise=4.0,
+            disgust=1.0, neutral=5.0, faceAngle=1.5,
+            isOccluded=True, face_embedding=embedding,
+        )
+        repo.insertRecord(record)
+
+        mock_conn.execute.assert_called_once()
+        mock_conn.commit.assert_called_once()
+
+    def test_insert_record_encodes_is_occluded_false_as_zero(self) -> None:
+        """isOccluded=False が 0 としてエンコードされること（execute が呼ばれること）。"""
+        repo, mock_engine = self._make_repo_with_engine()
+        mock_conn = self._setup_conn(mock_engine)
+
+        record = AnalysisRecord(
+            actor="a", filename="img.jpg", shootingDate="2026-04-01",
+            angry=0, fear=0, happy=0, sad=0, surprise=0, disgust=0, neutral=100,
+            faceAngle=0.0, isOccluded=False, face_embedding=[],
+        )
+        repo.insertRecord(record)
+
+        mock_conn.execute.assert_called_once()
+
+    def test_insert_record_commits_after_execute(self) -> None:
+        """execute 後に conn.commit が呼ばれること。"""
+        repo, mock_engine = self._make_repo_with_engine()
+        mock_conn = self._setup_conn(mock_engine)
+
+        record = AnalysisRecord(
+            actor="a", filename="img.jpg", shootingDate="2026-04-01",
+            angry=0, fear=0, happy=0, sad=0, surprise=0, disgust=0, neutral=100,
+            faceAngle=0.0, isOccluded=False, face_embedding=[],
+        )
+        repo.insertRecord(record)
+
+        mock_conn.commit.assert_called_once_with()
+
+    # --- insertEntry ---
+
+    def test_insert_entry_executes_insert_ignore_sql(self) -> None:
+        """INSERT IGNORE が実行されること。"""
+        repo, mock_engine = self._make_repo_with_engine()
+        mock_conn = self._setup_conn(mock_engine)
+
+        entry = AnalysisEntry(
+            filename="img001.jpg",
+            shootingDate="2026-04-01",
+            score=0.8,
+            selectionState="pending",
+            selectedAt=None,
+        )
+        repo.insertEntry("actor_a", entry)
+
+        mock_conn.execute.assert_called_once()
+        mock_conn.commit.assert_called_once()
+
+    def test_insert_entry_commits_after_execute(self) -> None:
+        """execute 後に conn.commit が呼ばれること。"""
+        repo, mock_engine = self._make_repo_with_engine()
+        mock_conn = self._setup_conn(mock_engine)
+
+        entry = AnalysisEntry(filename="img001.jpg", shootingDate="2026-04-01")
+        repo.insertEntry("actor_a", entry)
+
+        mock_conn.commit.assert_called_once_with()
+
+    def test_insert_entry_with_none_score(self) -> None:
+        """score が None の場合も execute が呼ばれること。"""
+        repo, mock_engine = self._make_repo_with_engine()
+        mock_conn = self._setup_conn(mock_engine)
+
+        entry = AnalysisEntry(filename="img001.jpg", shootingDate="2026-04-01", score=None)
+        repo.insertEntry("actor_a", entry)
+
+        mock_conn.execute.assert_called_once()
+
+    def test_insert_entry_inserts_all_fields(self) -> None:
+        """全フィールドで execute・commit が呼ばれること。"""
+        repo, mock_engine = self._make_repo_with_engine()
+        mock_conn = self._setup_conn(mock_engine)
+
+        entry = AnalysisEntry(
+            filename="photo.jpg",
+            shootingDate="2026-05-01",
+            score=0.95,
+            selectionState="ok",
+            selectedAt="2026-05-02 12:00:00",
+        )
+        repo.insertEntry("actor_b", entry)
+
+        mock_conn.execute.assert_called_once()
+        mock_conn.commit.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -392,7 +462,6 @@ class TestPhotoAnalyzer:
         assert result.isOccluded is False
         assert result.face_embedding == [0.1] * 128
 
-        # subprocess.run の引数検証
         mock_run.assert_called_once_with(
             [
                 sys.executable,
@@ -408,7 +477,7 @@ class TestPhotoAnalyzer:
         mock_date.assert_called_once_with(img_path)
 
     def test_analyze_returns_record_with_is_occluded_true(self, tmp_path: Path) -> None:
-        """最大感情スコアが低く isOccluded=True の結果を正しく返すこと。"""
+        """isOccluded=True の結果を正しく返すこと。"""
         img_path = tmp_path / "img.jpg"
         img_path.touch()
 
@@ -485,85 +554,6 @@ class TestPhotoAnalyzer:
 
 
 # ---------------------------------------------------------------------------
-# PhotoMover
-# ---------------------------------------------------------------------------
-
-
-class TestPhotoMover:
-    """PhotoMover のテスト。"""
-
-    def _make_mover(self, tmp_path: Path) -> PhotoMover:
-        """テスト用の PhotoMover を生成する。"""
-        return PhotoMover(one_drive_root=tmp_path)
-
-    def test_move_to_images_moves_file(self, tmp_path: Path) -> None:
-        """inbox/{actor}/ から images/{actor}/ へファイルを移動すること。"""
-        inbox_dir = tmp_path / "inbox" / "actor_a"
-        inbox_dir.mkdir(parents=True)
-        src_file = inbox_dir / "img.jpg"
-        src_file.write_text("data")
-
-        mover = self._make_mover(tmp_path)
-        mover.moveToImages("actor_a", "img.jpg")
-
-        assert not src_file.exists()
-        assert (tmp_path / "images" / "actor_a" / "img.jpg").exists()
-
-    def test_move_to_images_creates_dst_dir(self, tmp_path: Path) -> None:
-        """images/{actor}/ が存在しなくても作成して移動すること。"""
-        inbox_dir = tmp_path / "inbox" / "actor_a"
-        inbox_dir.mkdir(parents=True)
-        (inbox_dir / "img.jpg").write_text("data")
-
-        mover = self._make_mover(tmp_path)
-        mover.moveToImages("actor_a", "img.jpg")
-
-        assert (tmp_path / "images" / "actor_a" / "img.jpg").exists()
-
-    def test_move_to_confirmed_moves_file(self, tmp_path: Path) -> None:
-        """images/{actor}/ から confirmed/{actor}/ へファイルを移動すること。"""
-        images_dir = tmp_path / "images" / "actor_a"
-        images_dir.mkdir(parents=True)
-        src_file = images_dir / "img.jpg"
-        src_file.write_text("data")
-
-        mover = self._make_mover(tmp_path)
-        mover.moveToConfirmed("actor_a", "img.jpg")
-
-        assert not src_file.exists()
-        assert (tmp_path / "confirmed" / "actor_a" / "img.jpg").exists()
-
-    def test_move_to_confirmed_creates_dst_dir(self, tmp_path: Path) -> None:
-        """confirmed/{actor}/ が存在しなくても作成して移動すること。"""
-        images_dir = tmp_path / "images" / "actor_a"
-        images_dir.mkdir(parents=True)
-        (images_dir / "img.jpg").write_text("data")
-
-        mover = self._make_mover(tmp_path)
-        mover.moveToConfirmed("actor_a", "img.jpg")
-
-        assert (tmp_path / "confirmed" / "actor_a" / "img.jpg").exists()
-
-    def test_delete_from_images_deletes_file(self, tmp_path: Path) -> None:
-        """images/{actor}/ のファイルを削除すること。"""
-        images_dir = tmp_path / "images" / "actor_a"
-        images_dir.mkdir(parents=True)
-        target = images_dir / "img.jpg"
-        target.write_text("data")
-
-        mover = self._make_mover(tmp_path)
-        mover.deleteFromImages("actor_a", "img.jpg")
-
-        assert not target.exists()
-
-    def test_delete_from_images_does_nothing_when_file_not_exists(self, tmp_path: Path) -> None:
-        """ファイルが存在しない場合も例外を送出しないこと。"""
-        mover = self._make_mover(tmp_path)
-        # 例外が送出されないことを確認
-        mover.deleteFromImages("actor_a", "nonexistent.jpg")
-
-
-# ---------------------------------------------------------------------------
 # run
 # ---------------------------------------------------------------------------
 
@@ -573,18 +563,16 @@ class TestRun:
 
     def _make_deps(self, tmp_path: Path):
         """DI 用の依存オブジェクトをまとめて返す。"""
-        project_root = tmp_path / "project"
-        one_drive_root = tmp_path / "onedrive"
-        project_root.mkdir()
-        one_drive_root.mkdir()
-        repo = AnalysisRepository(project_root, one_drive_root)
-        mover = PhotoMover(one_drive_root)
+        analyze_root = tmp_path / "analyze"
+        analyze_root.mkdir()
+        mock_engine = MagicMock()
+        repo = AnalysisRepository(engine=mock_engine)
         analyzer = PhotoAnalyzer()
-        return project_root, one_drive_root, repo, mover, analyzer
+        return analyze_root, mock_engine, repo, analyzer
 
     def test_run_calls_run_analyze_by_default(self, tmp_path: Path) -> None:
         """mode='analyze' のとき _run_analyze が呼ばれること。"""
-        project_root, one_drive_root, repo, mover, analyzer = self._make_deps(tmp_path)
+        analyze_root, mock_engine, repo, analyzer = self._make_deps(tmp_path)
 
         with patch("src.analysis.main._load_env"):
             with patch("src.analysis.main._run_analyze") as mock_analyze:
@@ -592,76 +580,73 @@ class TestRun:
                     mode="analyze",
                     analyzer=analyzer,
                     repository=repo,
-                    mover=mover,
-                    project_root=project_root,
-                    one_drive_root=one_drive_root,
+                    analyze_root=analyze_root,
+                    engine=mock_engine,
                 )
 
-        mock_analyze.assert_called_once_with(one_drive_root, analyzer, repo, mover)
+        mock_analyze.assert_called_once_with(analyze_root, analyzer, repo, max_workers=2)
 
     def test_run_calls_run_scoring(self, tmp_path: Path) -> None:
         """mode='scoring' のとき _run_scoring が呼ばれること。"""
-        project_root, one_drive_root, repo, mover, analyzer = self._make_deps(tmp_path)
+        analyze_root, mock_engine, repo, analyzer = self._make_deps(tmp_path)
 
         with patch("src.analysis.main._load_env"):
             with patch("src.analysis.main._run_scoring") as mock_scoring:
                 run(
                     mode="scoring",
                     repository=repo,
-                    mover=mover,
-                    project_root=project_root,
-                    one_drive_root=one_drive_root,
+                    analyze_root=analyze_root,
+                    engine=mock_engine,
                 )
 
         mock_scoring.assert_called_once_with()
 
     def test_run_calls_run_finalize(self, tmp_path: Path) -> None:
         """mode='finalize' のとき _run_finalize が呼ばれること。"""
-        project_root, one_drive_root, repo, mover, analyzer = self._make_deps(tmp_path)
+        analyze_root, mock_engine, repo, analyzer = self._make_deps(tmp_path)
 
         with patch("src.analysis.main._load_env"):
             with patch("src.analysis.main._run_finalize") as mock_finalize:
                 run(
                     mode="finalize",
                     repository=repo,
-                    mover=mover,
-                    project_root=project_root,
-                    one_drive_root=one_drive_root,
+                    analyze_root=analyze_root,
+                    engine=mock_engine,
                 )
 
         mock_finalize.assert_called_once_with()
 
     def test_run_creates_default_instances_from_env(self, tmp_path: Path) -> None:
         """依存オブジェクトを省略した場合、環境変数からインスタンスを生成すること。"""
-        project_root = tmp_path / "project"
-        one_drive_root = tmp_path / "onedrive"
+        analyze_root = tmp_path / "analyze"
+        mock_engine = MagicMock()
 
         with patch("src.analysis.main._load_env"):
             with patch("src.analysis.main._run_analyze") as mock_analyze:
-                with patch.dict(
-                    "os.environ",
-                    {"PROJECT_ROOT": str(project_root), "ONE_DRIVE_ROOT": str(one_drive_root)},
-                ):
-                    run(mode="analyze")
+                with patch("src.analysis.main._create_engine", return_value=mock_engine):
+                    with patch.dict(
+                        "os.environ",
+                        {"ANALYZE_ROOT": str(analyze_root)},
+                    ):
+                        run(mode="analyze")
 
         mock_analyze.assert_called_once()
-        _, called_analyzer, called_repo, called_mover = mock_analyze.call_args[0]
+        called_analyze_root, called_analyzer, called_repo = mock_analyze.call_args[0]
+        assert called_analyze_root == analyze_root
         assert isinstance(called_analyzer, PhotoAnalyzer)
         assert isinstance(called_repo, AnalysisRepository)
-        assert isinstance(called_mover, PhotoMover)
 
     def test_run_calls_load_env(self, tmp_path: Path) -> None:
         """run() の冒頭で _load_env が呼ばれること。"""
-        project_root, one_drive_root, repo, mover, _ = self._make_deps(tmp_path)
+        analyze_root, mock_engine, repo, _ = self._make_deps(tmp_path)
 
         with patch("src.analysis.main._load_env") as mock_load_env:
             with patch("src.analysis.main._run_analyze"):
                 run(
                     mode="analyze",
                     repository=repo,
-                    mover=mover,
-                    project_root=project_root,
-                    one_drive_root=one_drive_root,
+                    analyze_root=analyze_root,
+                    engine=mock_engine,
                 )
 
         mock_load_env.assert_called_once_with()
@@ -677,110 +662,160 @@ class TestRunAnalyze:
 
     def _make_deps(self, tmp_path: Path):
         """テスト用の依存オブジェクトを返す。"""
-        one_drive_root = tmp_path
+        analyze_root = tmp_path
         repo = MagicMock(spec=AnalysisRepository)
-        mover = MagicMock(spec=PhotoMover)
         analyzer = MagicMock(spec=PhotoAnalyzer)
-        return one_drive_root, repo, mover, analyzer
+        # デフォルト: 処理済みなし
+        repo.loadRecords.return_value = []
+        repo.loadProcessedKeys.return_value = set()
+        return analyze_root, repo, analyzer
 
-    def test_exits_early_when_inbox_not_exists(self, tmp_path: Path) -> None:
-        """inbox ディレクトリが存在しない場合、処理を中断すること。"""
-        one_drive_root, repo, mover, analyzer = self._make_deps(tmp_path)
+    def test_exits_early_when_analyze_root_not_exists(self, tmp_path: Path) -> None:
+        """ANALYZE_ROOT が存在しない場合、処理を中断すること。"""
+        analyze_root = tmp_path / "nonexistent"
+        repo = MagicMock(spec=AnalysisRepository)
+        analyzer = MagicMock(spec=PhotoAnalyzer)
 
-        with patch("src.analysis.main.tqdm", side_effect=lambda x, **kw: x):
-            _run_analyze(one_drive_root, analyzer, repo, mover)
+        _run_analyze(analyze_root, analyzer, repo)
 
         repo.loadRecords.assert_not_called()
         analyzer.analyze.assert_not_called()
 
-    def test_skips_non_directory_in_inbox(self, tmp_path: Path) -> None:
-        """inbox 直下のファイルはスキップすること。"""
-        inbox = tmp_path / "inbox"
-        inbox.mkdir()
-        (inbox / "file.txt").touch()
-
-        one_drive_root, repo, mover, analyzer = self._make_deps(tmp_path)
-        repo.loadRecords.return_value = []
-        repo.loadActorEntries.return_value = []
+    def test_exits_early_when_no_actor_dirs(self, tmp_path: Path) -> None:
+        """ANALYZE_ROOT に被写体ディレクトリが無い場合、処理を中断すること。"""
+        analyze_root = tmp_path
+        _, repo, analyzer = self._make_deps(tmp_path)
 
         with patch("src.analysis.main.tqdm", side_effect=lambda x, **kw: x):
-            _run_analyze(one_drive_root, analyzer, repo, mover)
+            _run_analyze(analyze_root, analyzer, repo)
+
+        repo.loadRecords.assert_not_called()
+        analyzer.analyze.assert_not_called()
+
+    def test_exits_early_when_no_image_files(self, tmp_path: Path) -> None:
+        """被写体ディレクトリにファイルが無い場合、解析を呼ばないこと。"""
+        analyze_root = tmp_path
+        (analyze_root / "actor_a").mkdir()
+        _, repo, analyzer = self._make_deps(tmp_path)
+
+        with patch("src.analysis.main.tqdm", side_effect=lambda x, **kw: x):
+            _run_analyze(analyze_root, analyzer, repo)
 
         analyzer.analyze.assert_not_called()
 
     def test_analyzes_image_and_saves(self, tmp_path: Path) -> None:
-        """画像ファイルを解析して pki と json を保存すること。"""
-        inbox_dir = tmp_path / "inbox" / "actor_a"
-        inbox_dir.mkdir(parents=True)
-        img_path = inbox_dir / "img001.jpg"
+        """画像ファイルを解析して DB INSERT を行うこと（ファイルは移動しない）。"""
+        analyze_root = tmp_path
+        actor_dir = analyze_root / "actor_a"
+        actor_dir.mkdir()
+        img_path = actor_dir / "img001.jpg"
         img_path.touch()
 
         record = AnalysisRecord(
-            actor="actor_a",
-            filename="img001.jpg",
-            shootingDate="2026-04-01",
+            actor="actor_a", filename="img001.jpg", shootingDate="2026-04-01",
             angry=5.0, fear=2.0, happy=80.0, sad=3.0,
             surprise=4.0, disgust=1.0, neutral=5.0,
             faceAngle=0.0, isOccluded=False, face_embedding=[0.1] * 128,
         )
-        one_drive_root, repo, mover, analyzer = self._make_deps(tmp_path)
-        repo.loadRecords.return_value = []
-        repo.loadActorEntries.return_value = []
+        _, repo, analyzer = self._make_deps(tmp_path)
         analyzer.analyze.return_value = record
 
         with patch("src.analysis.main.tqdm", side_effect=lambda x, **kw: x):
-            _run_analyze(one_drive_root, analyzer, repo, mover)
+            _run_analyze(analyze_root, analyzer, repo)
 
         # analyze の引数を検証
         analyzer.analyze.assert_called_once_with(img_path, "actor_a")
 
-        # moveToImages の呼び出しを検証
-        mover.moveToImages.assert_called_once_with("actor_a", "img001.jpg")
+        # insertRecord の呼び出しを検証
+        repo.insertRecord.assert_called_once_with(record)
 
-        # saveRecords の呼び出しを検証 (1 件追加)
-        saved_records = repo.saveRecords.call_args[0][0]
-        assert len(saved_records) == 1
-        assert saved_records[0].filename == "img001.jpg"
-
-        # saveActorEntries の呼び出しを検証 (score = max(80)/100 = 0.8)
-        repo.saveActorEntries.assert_called_once_with("actor_a", [
+        # insertEntry の呼び出しを検証 (score = max(80)/100 = 0.8)
+        repo.insertEntry.assert_called_once_with(
+            "actor_a",
             AnalysisEntry(
                 filename="img001.jpg",
                 shootingDate="2026-04-01",
                 score=0.8,
                 selectionState="pending",
                 selectedAt=None,
-            )
-        ])
+            ),
+        )
 
-    def test_tqdm_called_with_img_files_and_actor_desc(self, tmp_path: Path) -> None:
-        """tqdm が img_files・desc=actor名・unit='枚' で呼ばれること。"""
-        inbox_dir = tmp_path / "inbox" / "actor_a"
-        inbox_dir.mkdir(parents=True)
-        img_path = inbox_dir / "img001.jpg"
-        img_path.touch()
+        # ファイルは ANALYZE_ROOT に残ること
+        assert img_path.exists()
+
+    def test_tqdm_called_with_entries_and_desc(self, tmp_path: Path) -> None:
+        """tqdm が entries リスト・desc='解析'・unit='枚' で呼ばれること。"""
+        analyze_root = tmp_path
+        actor_dir = analyze_root / "actor_a"
+        actor_dir.mkdir()
+        (actor_dir / "img001.jpg").touch()
 
         record = AnalysisRecord(
             actor="actor_a", filename="img001.jpg", shootingDate="2026-04-01",
             angry=0, fear=0, happy=80, sad=0, surprise=0, disgust=0, neutral=20,
             faceAngle=0.0, isOccluded=False, face_embedding=[0.1] * 128,
         )
-        one_drive_root, repo, mover, analyzer = self._make_deps(tmp_path)
-        repo.loadRecords.return_value = []
-        repo.loadActorEntries.return_value = []
+        _, repo, analyzer = self._make_deps(tmp_path)
         analyzer.analyze.return_value = record
 
         with patch("src.analysis.main.tqdm", side_effect=lambda x, **kw: x) as mock_tqdm:
-            _run_analyze(one_drive_root, analyzer, repo, mover)
+            _run_analyze(analyze_root, analyzer, repo)
 
-        mock_tqdm.assert_called_once_with([img_path], desc="[actor_a]", unit="枚")
+        mock_tqdm.assert_called_once()
+        call_kwargs = mock_tqdm.call_args[1]
+        assert call_kwargs.get("desc") == "解析"
+        assert call_kwargs.get("unit") == "枚"
+        assert call_kwargs.get("total") == 1
+
+    def test_skips_already_processed_files(self, tmp_path: Path) -> None:
+        """sorting_state に既に存在するファイルはスキップすること。"""
+        analyze_root = tmp_path
+        actor_dir = analyze_root / "actor_a"
+        actor_dir.mkdir()
+        (actor_dir / "img001.jpg").touch()
+
+        _, repo, analyzer = self._make_deps(tmp_path)
+        # img001.jpg は処理済み
+        repo.loadProcessedKeys.return_value = {("actor_a", "img001.jpg")}
+
+        with patch("src.analysis.main.tqdm", side_effect=lambda x, **kw: x):
+            _run_analyze(analyze_root, analyzer, repo)
+
+        analyzer.analyze.assert_not_called()
+        repo.insertRecord.assert_not_called()
+        repo.insertEntry.assert_not_called()
+
+    def test_processes_only_unprocessed_files(self, tmp_path: Path) -> None:
+        """処理済みをスキップして未処理のみ解析すること。"""
+        analyze_root = tmp_path
+        actor_dir = analyze_root / "actor_a"
+        actor_dir.mkdir()
+        (actor_dir / "img001.jpg").touch()
+        (actor_dir / "img002.jpg").touch()
+
+        record = AnalysisRecord(
+            actor="actor_a", filename="img002.jpg", shootingDate="2026-04-01",
+            angry=0, fear=0, happy=80, sad=0, surprise=0, disgust=0, neutral=20,
+            faceAngle=0.0, isOccluded=False, face_embedding=[0.1] * 128,
+        )
+        _, repo, analyzer = self._make_deps(tmp_path)
+        # img001.jpg のみ処理済み
+        repo.loadProcessedKeys.return_value = {("actor_a", "img001.jpg")}
+        analyzer.analyze.return_value = record
+
+        with patch("src.analysis.main.tqdm", side_effect=lambda x, **kw: x):
+            _run_analyze(analyze_root, analyzer, repo)
+
+        # img002.jpg のみ解析されること
+        analyzer.analyze.assert_called_once_with(analyze_root / "actor_a" / "img002.jpg", "actor_a")
 
     def test_does_not_add_duplicate_record(self, tmp_path: Path) -> None:
-        """既存の (actor, filename) と同じレコードは追加しないこと。"""
-        inbox_dir = tmp_path / "inbox" / "actor_a"
-        inbox_dir.mkdir(parents=True)
-        img_path = inbox_dir / "img001.jpg"
-        img_path.touch()
+        """既存の (actor, filename) と同じレコードは analysis_records に追加しないこと。"""
+        analyze_root = tmp_path
+        actor_dir = analyze_root / "actor_a"
+        actor_dir.mkdir()
+        (actor_dir / "img001.jpg").touch()
 
         existing_record = AnalysisRecord(
             actor="actor_a", filename="img001.jpg", shootingDate="2026-04-01",
@@ -793,118 +828,166 @@ class TestRunAnalyze:
             faceAngle=0.0, isOccluded=False, face_embedding=[0.1] * 128,
         )
 
-        one_drive_root, repo, mover, analyzer = self._make_deps(tmp_path)
+        _, repo, analyzer = self._make_deps(tmp_path)
         repo.loadRecords.return_value = [existing_record]
-        repo.loadActorEntries.return_value = []
         analyzer.analyze.return_value = new_record
 
         with patch("src.analysis.main.tqdm", side_effect=lambda x, **kw: x):
-            _run_analyze(one_drive_root, analyzer, repo, mover)
+            _run_analyze(analyze_root, analyzer, repo)
 
-        # レコード数は増えない（重複追加しない）
-        saved_records = repo.saveRecords.call_args[0][0]
-        assert len(saved_records) == 1
+        repo.insertRecord.assert_not_called()
 
-    def test_does_not_add_duplicate_entry(self, tmp_path: Path) -> None:
-        """既存の filename と同じエントリは追加しないこと。"""
-        inbox_dir = tmp_path / "inbox" / "actor_a"
-        inbox_dir.mkdir(parents=True)
-        img_path = inbox_dir / "img001.jpg"
+    def test_handles_null_record_gracefully(self, tmp_path: Path) -> None:
+        """analyze が None を返した場合、score=None で insertEntry を呼ぶこと。"""
+        analyze_root = tmp_path
+        actor_dir = analyze_root / "actor_a"
+        actor_dir.mkdir()
+        img_path = actor_dir / "img001.jpg"
         img_path.touch()
 
-        existing_entry = AnalysisEntry(
-            filename="img001.jpg",
-            shootingDate="2026-04-01",
-            score=0.9,
-            selectionState="ok",
-            selectedAt="2026-04-06T12:00:00.000Z",
-        )
+        _, repo, analyzer = self._make_deps(tmp_path)
+        analyzer.analyze.return_value = None
+
+        with patch("src.analysis.main.tqdm", side_effect=lambda x, **kw: x):
+            with patch("src.analysis.main._get_shooting_date", return_value="2026-04-01"):
+                _run_analyze(analyze_root, analyzer, repo)
+
+        repo.insertRecord.assert_not_called()
+        repo.insertEntry.assert_called_once()
+        call_args = repo.insertEntry.call_args[0]
+        assert call_args[0] == "actor_a"
+        assert call_args[1].score is None
+        assert call_args[1].filename == "img001.jpg"
+
+    def test_processes_multiple_actors(self, tmp_path: Path) -> None:
+        """複数の actor のファイルを処理すること。"""
+        analyze_root = tmp_path
+        for actor in ["actor_a", "actor_b"]:
+            actor_dir = analyze_root / actor
+            actor_dir.mkdir()
+            (actor_dir / "img.jpg").touch()
+
+        record_a = AnalysisRecord("actor_a", "img.jpg", "2026-04-01", 0, 0, 80, 0, 0, 0, 20, 0.0, False, [0.1] * 128)
+        record_b = AnalysisRecord("actor_b", "img.jpg", "2026-04-01", 0, 0, 70, 0, 0, 0, 30, 0.0, False, [0.1] * 128)
+
+        _, repo, analyzer = self._make_deps(tmp_path)
+        analyzer.analyze.side_effect = [record_a, record_b]
+
+        with patch("src.analysis.main.tqdm", side_effect=lambda x, **kw: x):
+            _run_analyze(analyze_root, analyzer, repo)
+
+        assert analyzer.analyze.call_count == 2
+        assert repo.insertEntry.call_count == 2
+
+    def test_all_actors_processed(self, tmp_path: Path) -> None:
+        """全被写体のファイルが処理されること（並列実行のため順序は保証しない）。"""
+        analyze_root = tmp_path
+        for actor in ["charlie", "alice", "bob"]:
+            (analyze_root / actor).mkdir()
+            (analyze_root / actor / "img.jpg").touch()
+
+        _, repo, analyzer = self._make_deps(tmp_path)
+        record = AnalysisRecord("actor", "img.jpg", "2026-04-01", 0, 0, 80, 0, 0, 0, 20, 0.0, False, [0.1] * 128)
+        analyzer.analyze.return_value = record
+
+        with patch("src.analysis.main.tqdm", side_effect=lambda x, **kw: x):
+            _run_analyze(analyze_root, analyzer, repo)
+
+        processed_actors = {c[0][1] for c in analyzer.analyze.call_args_list}  # actor 引数
+        assert processed_actors == {"alice", "bob", "charlie"}
+        assert analyzer.analyze.call_count == 3
+
+    def test_insert_called_after_analyze(self, tmp_path: Path) -> None:
+        """insertRecord・insertEntry は analyze より後に呼ばれること。"""
+        analyze_root = tmp_path
+        actor_dir = analyze_root / "actor_a"
+        actor_dir.mkdir()
+        (actor_dir / "img001.jpg").touch()
+
         record = AnalysisRecord(
             actor="actor_a", filename="img001.jpg", shootingDate="2026-04-01",
             angry=0, fear=0, happy=80, sad=0, surprise=0, disgust=0, neutral=20,
             faceAngle=0.0, isOccluded=False, face_embedding=[0.1] * 128,
         )
+        _, repo, analyzer = self._make_deps(tmp_path)
+        analyzer.analyze.return_value = record
 
-        one_drive_root, repo, mover, analyzer = self._make_deps(tmp_path)
-        repo.loadRecords.return_value = []
-        repo.loadActorEntries.return_value = [existing_entry]
+        call_order = []
+        repo.insertRecord.side_effect = lambda *a, **kw: call_order.append("insertRecord")
+        repo.insertEntry.side_effect = lambda *a, **kw: call_order.append("insertEntry")
+        analyzer.analyze.side_effect = lambda *a, **kw: call_order.append("analyze") or record
+
+        with patch("src.analysis.main.tqdm", side_effect=lambda x, **kw: x):
+            _run_analyze(analyze_root, analyzer, repo)
+
+        assert call_order == ["analyze", "insertRecord", "insertEntry"]
+
+    def test_max_workers_is_passed_to_thread_pool(self, tmp_path: Path) -> None:
+        """max_workers が ThreadPoolExecutor に渡されること。"""
+        analyze_root = tmp_path
+        actor_dir = analyze_root / "actor_a"
+        actor_dir.mkdir()
+        (actor_dir / "img001.jpg").touch()
+
+        _, repo, analyzer = self._make_deps(tmp_path)
+        record = AnalysisRecord(
+            actor="actor_a", filename="img001.jpg", shootingDate="2026-04-01",
+            angry=0, fear=0, happy=80, sad=0, surprise=0, disgust=0, neutral=20,
+            faceAngle=0.0, isOccluded=False, face_embedding=[0.1] * 128,
+        )
+        analyzer.analyze.return_value = record
+
+        with patch("src.analysis.main.ThreadPoolExecutor") as mock_executor_cls:
+            mock_executor = MagicMock()
+            mock_executor_cls.return_value.__enter__ = MagicMock(return_value=mock_executor)
+            mock_executor_cls.return_value.__exit__ = MagicMock(return_value=False)
+            mock_executor.submit.return_value = MagicMock(spec=Future)
+            mock_executor.submit.return_value.result.return_value = None
+            with patch("src.analysis.main.tqdm", side_effect=lambda x, **kw: iter([])):
+                _run_analyze(analyze_root, analyzer, repo, max_workers=3)
+
+        mock_executor_cls.assert_called_once_with(max_workers=3)
+
+    def test_worker_exception_is_caught_and_logged(self, tmp_path: Path, capsys) -> None:
+        """ワーカースレッドで例外が発生した場合、WARN ログを出力して処理を継続すること。"""
+        analyze_root = tmp_path
+        actor_dir = analyze_root / "actor_a"
+        actor_dir.mkdir()
+        (actor_dir / "img001.jpg").touch()
+
+        _, repo, analyzer = self._make_deps(tmp_path)
+        analyzer.analyze.side_effect = RuntimeError("unexpected failure")
+
+        with patch("src.analysis.main.tqdm", side_effect=lambda x, **kw: x):
+            # 例外が呼び出し元に伝播しないこと
+            _run_analyze(analyze_root, analyzer, repo)
+
+        captured = capsys.readouterr()
+        assert "[WARN]" in captured.out
+        assert "actor_a/img001.jpg" in captured.out
+
+    def test_subdirectories_in_actor_dir_are_ignored(self, tmp_path: Path) -> None:
+        """被写体ディレクトリ内のサブディレクトリはスキップすること。"""
+        analyze_root = tmp_path
+        actor_dir = analyze_root / "actor_a"
+        actor_dir.mkdir()
+        (actor_dir / "img001.jpg").touch()
+        (actor_dir / "subdir").mkdir()  # サブディレクトリは無視
+
+        record = AnalysisRecord(
+            actor="actor_a", filename="img001.jpg", shootingDate="2026-04-01",
+            angry=0, fear=0, happy=80, sad=0, surprise=0, disgust=0, neutral=20,
+            faceAngle=0.0, isOccluded=False, face_embedding=[0.1] * 128,
+        )
+        _, repo, analyzer = self._make_deps(tmp_path)
         analyzer.analyze.return_value = record
 
         with patch("src.analysis.main.tqdm", side_effect=lambda x, **kw: x):
-            _run_analyze(one_drive_root, analyzer, repo, mover)
+            _run_analyze(analyze_root, analyzer, repo)
 
-        # エントリ数は増えない（重複追加しない）
-        saved_entries = repo.saveActorEntries.call_args[0][1]
-        assert len(saved_entries) == 1
-        assert saved_entries[0].selectionState == "ok"  # 既存が維持される
-
-    def test_handles_null_record_gracefully(self, tmp_path: Path) -> None:
-        """analyze が None を返した場合、score=None でエントリを追加すること。"""
-        inbox_dir = tmp_path / "inbox" / "actor_a"
-        inbox_dir.mkdir(parents=True)
-        img_path = inbox_dir / "img001.jpg"
-        img_path.touch()
-
-        one_drive_root, repo, mover, analyzer = self._make_deps(tmp_path)
-        repo.loadRecords.return_value = []
-        repo.loadActorEntries.return_value = []
-        analyzer.analyze.return_value = None
-
-        with patch("src.analysis.main.tqdm", side_effect=lambda x, **kw: x):
-            with patch("src.analysis.main._get_shooting_date", return_value="2026-04-01"):
-                _run_analyze(one_drive_root, analyzer, repo, mover)
-
-        # レコードは追加されない
-        saved_records = repo.saveRecords.call_args[0][0]
-        assert len(saved_records) == 0
-
-        # エントリは score=None で追加される
-        saved_entries = repo.saveActorEntries.call_args[0][1]
-        assert len(saved_entries) == 1
-        assert saved_entries[0].score is None
-        assert saved_entries[0].filename == "img001.jpg"
-
-        # ファイルは移動される
-        mover.moveToImages.assert_called_once_with("actor_a", "img001.jpg")
-
-    def test_ignores_non_image_files(self, tmp_path: Path) -> None:
-        """拡張子が対象外のファイルは解析しないこと。"""
-        inbox_dir = tmp_path / "inbox" / "actor_a"
-        inbox_dir.mkdir(parents=True)
-        (inbox_dir / "document.pdf").touch()
-        (inbox_dir / "readme.txt").touch()
-
-        one_drive_root, repo, mover, analyzer = self._make_deps(tmp_path)
-        repo.loadRecords.return_value = []
-        repo.loadActorEntries.return_value = []
-
-        with patch("src.analysis.main.tqdm", side_effect=lambda x, **kw: x):
-            _run_analyze(one_drive_root, analyzer, repo, mover)
-
-        analyzer.analyze.assert_not_called()
-        mover.moveToImages.assert_not_called()
-
-    def test_processes_multiple_actors(self, tmp_path: Path) -> None:
-        """複数の actor ディレクトリを処理すること。"""
-        for actor in ["actor_a", "actor_b"]:
-            inbox_dir = tmp_path / "inbox" / actor
-            inbox_dir.mkdir(parents=True)
-            (inbox_dir / "img.jpg").touch()
-
-        record_a = AnalysisRecord("actor_a", "img.jpg", "2026-04-01", 0, 0, 80, 0, 0, 0, 20, 0.0, False, [0.1] * 128)
-        record_b = AnalysisRecord("actor_b", "img.jpg", "2026-04-01", 0, 0, 70, 0, 0, 0, 30, 0.0, False, [0.1] * 128)
-
-        one_drive_root, repo, mover, analyzer = self._make_deps(tmp_path)
-        repo.loadRecords.return_value = []
-        repo.loadActorEntries.return_value = []
-        analyzer.analyze.side_effect = [record_a, record_b]
-
-        with patch("src.analysis.main.tqdm", side_effect=lambda x, **kw: x):
-            _run_analyze(one_drive_root, analyzer, repo, mover)
-
-        assert analyzer.analyze.call_count == 2
-        assert mover.moveToImages.call_count == 2
-        assert repo.saveActorEntries.call_count == 2
+        # ファイル 1 件のみ処理されること
+        assert analyzer.analyze.call_count == 1
+        analyzer.analyze.assert_called_once_with(actor_dir / "img001.jpg", "actor_a")
 
 
 # ---------------------------------------------------------------------------
@@ -949,12 +1032,12 @@ class TestMain:
     """main() の CLI 引数テスト。"""
 
     def test_main_calls_run_with_analyze_by_default(self) -> None:
-        """引数なしのとき run(mode='analyze') が呼ばれること。"""
+        """引数なしのとき run(mode='analyze', max_workers=2) が呼ばれること。"""
         with patch("sys.argv", ["main.py"]):
             with patch("src.analysis.main.run") as mock_run:
                 main()
 
-        mock_run.assert_called_once_with(mode="analyze")
+        mock_run.assert_called_once_with(mode="analyze", max_workers=2)
 
     def test_main_calls_run_with_scoring(self) -> None:
         """--scoring フラグのとき run(mode='scoring') が呼ばれること。"""
@@ -972,3 +1055,10 @@ class TestMain:
 
         mock_run.assert_called_once_with(mode="finalize")
 
+    def test_main_passes_workers_flag_to_run(self) -> None:
+        """--workers N フラグが run(max_workers=N) に渡されること。"""
+        with patch("sys.argv", ["main.py", "--workers", "4"]):
+            with patch("src.analysis.main.run") as mock_run:
+                main()
+
+        mock_run.assert_called_once_with(mode="analyze", max_workers=4)

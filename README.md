@@ -7,12 +7,13 @@
 | レイヤー | 技術 |
 |---|---|
 | フロントエンド | Next.js 15 (App Router), TypeScript, Tailwind CSS, framer-motion |
-| バックエンド | Next.js API Routes（ローカル FS 直接読み書き） |
-| 解析スクリプト | Python 3.13, DeepFace, Facenet, opencv-python-headless, Pillow, tf-keras, tqdm |
-| スコアリングスクリプト | Python 3.13, Scikit-learn, pandas, tqdm |
-| データ整理スクリプト | Python 3.13 |
+| バックエンド | Next.js API Routes, Drizzle ORM（MariaDB） |
+| 解析スクリプト | Python 3.13, DeepFace, Facenet, opencv-python-headless, Pillow, tf-keras, SQLAlchemy, tqdm |
+| スコアリングスクリプト | Python 3.13, Scikit-learn, pandas, SQLAlchemy, tqdm |
+| データ整理スクリプト | Python 3.13, SQLAlchemy |
 | ホスティング | Raspberry Pi 4 + Cloudflare Tunnel |
-| ストレージ | OneDrive（Mac・Pi 双方にローカルマウント） |
+| データベース | MySQL（Raspberry Pi 上で稼働） |
+| ストレージ | Mac から Pi の `data/` ディレクトリに直接マウント |
 
 ## セットアップ
 
@@ -63,30 +64,71 @@ cp .env.example .env
 | 変数名 | 説明 |
 |---|---|
 | `PROJECT_ROOT` | プロジェクトのベースディレクトリ |
-| `ONE_DRIVE_ROOT` | OneDrive のベースディレクトリ |
+| `MYSQL_HOST` | MySQL ホスト名 |
+| `MYSQL_PORT` | MySQL ポート番号 |
+| `MYSQL_USER` | MySQL ユーザー名 |
+| `MYSQL_PASSWORD` | MySQL パスワード |
+| `MYSQL_DATABASE` | MySQL データベース名 |
 
 ```bash
 PROJECT_ROOT=/path/to/LivePhotoSelector
-ONE_DRIVE_ROOT=/path/to/OneDrive/LivePhotoSelector
+MYSQL_HOST=localhost
+MYSQL_PORT=3306
+MYSQL_USER=livephoto
+MYSQL_PASSWORD=secret
+MYSQL_DATABASE=livephoto
 ```
 
 ## 操作ワークフロー
 
 ```
-1. 写真を OneDrive の inbox/{actor}/ に配置
+1. 写真を data/inbox/{actor}/ に配置
 
-2. Mac で解析（inbox → images 移動 + analysis.pki / {actor}_analysis.json 更新）
+2. Mac で解析（inbox → images へ移動 + MySQL に登録）
    bash analyze.sh
-   ※ OOM Kill 時は自動再起動。inbox が空になるまでループする
+   ※ OOM Kill 時は自動再起動。file_list.txt が空になるまでループする
+   ※ 1 枚処理するたびに file_list.txt からエントリを削除（再起動時の続きから再開対応）
+   ※ MySQL に INSERT されるため Pi 側から即時参照可能
 
 3. iPhone で Pi にアクセスして OK/NG 選別
    右スワイプ = OK  /  左スワイプ = NG
+   選別結果は MySQL の sorting_state テーブルに即時書き込まれる
 
 4. スコアリング（Scikit-learn で学習・スコア付与）
    python -m src.scoring.main
 
-5. 写真整理（OK → confirmed/ 移動、NG → 削除、ok/ng エントリを analysis.json へ移動）
+5. 写真整理（OK → confirmed/ 移動、NG → 削除）
    python -m src.finalize.main
+```
+
+## Raspberry Pi へのデプロイ
+
+```bash
+rsync -avz --delete \
+  --exclude='.claude' \
+  --exclude='.coverage' \
+  --exclude='.env' \
+  --exclude='.git' \
+  --exclude='.gitignore' \
+  --exclude='.next' \
+  --exclude='.pytest_cache' \
+  --exclude='.venv' \
+  --exclude='.venv_docker' \
+  --exclude='.vscode' \
+  --exclude='.claudeignore' \
+  --exclude='CLAUDE.md' \
+  --exclude='README.md' \
+  --exclude='analyze.sh' \
+  --exclude='src' \
+  --exclude='coverage' \
+  --exclude='data' \
+  --exclude='docs' \
+  --exclude='migrations' \
+  --exclude='node_modules' \
+  --exclude='package-lock.json' \
+  --exclude='vitest.config.ts' \
+  --exclude='vitest.setup.ts' \
+  /path/to/LivePhotoSelector/ pi@<PiのIPアドレス>:/path/to/LivePhotoSelector/
 ```
 
 ## 実行コマンド
@@ -102,17 +144,14 @@ npm start         # 本番起動
 ### 解析スクリプト
 
 ```bash
-# 仮想環境を有効化してから実行する
-source .venv/bin/activate
-
-# 解析（INBOX の写真を DeepFace で解析して IMAGES へ移動）
+# 解析（data/inbox の写真を DeepFace で解析して MariaDB に登録）
 # OOM Kill 時の自動再起動ループ込み
 bash analyze.sh
 
 # スコアリング（Scikit-learn で学習・スコア更新）
 python -m src.scoring.main
 
-# 写真整理（OK → confirmed/、NG → 削除、ok/ng エントリを analysis.json へ移動）
+# 写真整理（OK → confirmed/、NG → 削除）
 python -m src.finalize.main
 ```
 
@@ -155,10 +194,11 @@ python -m pytest src/finalize/tests/ --cov=src/finalize --cov-report=term-missin
 │   │   └── page.tsx           # 写真選別（Server Component）
 │   └── api/
 │       └── actors/
-│           ├── route.ts                      # GET /api/actors
+│           ├── route.ts                          # GET /api/actors
 │           └── [actor]/
-│               ├── photos/[filename]/route.ts  # PATCH 選別状態
-│               └── images/[filename]/route.ts  # GET 画像配信
+│               ├── photos/route.ts               # GET 写真一覧
+│               ├── photos/[filename]/route.ts    # PATCH 選別状態
+│               └── images/[filename]/route.ts    # GET 画像配信
 ├── components/
 │   ├── PhotoCard.tsx          # 写真カード（スワイプ UI）
 │   └── PhotoSelectionClient.tsx  # 写真選別クライアント
@@ -167,26 +207,40 @@ python -m pytest src/finalize/tests/ --cov=src/finalize --cov-report=term-missin
 │   └── usePhotoSelection.ts   # 選別状態管理フック
 ├── lib/
 │   ├── types.ts               # 共通型定義
+│   ├── db.ts                  # Drizzle ORM / MariaDB 接続管理
+│   ├── schema.ts              # Drizzle テーブル定義
 │   └── repositories/
-│       ├── LocalAnalysisRepository.ts  # FS 読み書きリポジトリ
-│       └── ResultRepository.ts         # HTTP 保存リポジトリ
+│       ├── PhotoRepository.ts          # Drizzle ORM リポジトリ
+│       └── LocalAnalysisRepository.ts  # FS 読み書きリポジトリ
 ├── docs/                      # 仕様・設計ドキュメント
 ├── analyze.sh                 # 解析自動再起動スクリプト
 └── requirements.txt           # Python 依存パッケージ
 ```
 
-OneDrive 共有ディレクトリ（Mac ↔ Pi 共有）:
+解析前の写真置き場:
 
 ```text
-{ONE_DRIVE_ROOT}/
-├── data/
-│   ├── analysis.pki           # DeepFace 解析データ
-│   ├── {actor}_analysis.json  # 被写体別選別データ
-│   └── {actor}_model.joblib   # 被写体別学習済みモデル
-├── inbox/                     # 解析前の写真置き場
-├── images/                    # 解析済み写真
-└── confirmed/                 # OK 確定写真
+{ANALYZE_ROOT}/
+    ├── actor_a/
+    └── actor_b/
 ```
+
+Pi のデータディレクトリ:
+
+```text
+{PROJECT_ROOT}/
+├── data/
+│   └── {actor}_model.joblib   # 被写体別学習済みモデル
+├── images/                    # 解析済み写真
+│   ├── actor_a/
+│   └── actor_b/
+└── confirmed/                 # OK 確定写真
+    └── actor_a/
+```
+
+MySQL（Raspberry Pi 上で稼働）:
+- データベース名: `livephoto`（環境変数 `MYSQL_DATABASE` で設定）
+- テーブル: `sorting_state`（被写体ごとの選別状態を管理）
 
 ## ドキュメント
 
@@ -194,7 +248,7 @@ OneDrive 共有ディレクトリ（Mac ↔ Pi 共有）:
 |---|---|
 | [docs/spec-base.md](docs/spec-base.md) | 機能要件・UI/UX 仕様 |
 | [docs/workflow.md](docs/workflow.md) | データフロー・操作ワークフロー |
-| [docs/spec-data-format.md](docs/spec-data-format.md) | JSON / PKL データ形式 |
+| [docs/spec-table.md](docs/spec-table.md) | テーブル設計・データ形式 |
 | [docs/spec-directory.md](docs/spec-directory.md) | ディレクトリ構成 |
 | [docs/architecture.md](docs/architecture.md) | 設計上の決定事項 |
 | [docs/spec-analysis.md](docs/spec-analysis.md) | DeepFace 解析仕様 |

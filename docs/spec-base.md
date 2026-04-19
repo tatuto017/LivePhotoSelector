@@ -5,12 +5,15 @@
 - **被写体管理**: 撮影対象（アーティスト/メンバー等）は複数人を想定し、対象単位で選別・管理できるようにする。
 - **モバイル最適化**: 写真選択画面は主に iPhone からの操作を想定した UI/UX とする。
 - **動的読み込みと更新**:
-  - 写真の読み込みは、画面外に5枚まで先読みする動的ロードにする。
   - OK/NG が確定された画像は画面から即座に非表示にする（楽観的更新）。
+  - 写真の読み込みは、表示写真1枚 + 5枚まで先読みする動的ロードにする。
+- **選択結果保存**
+  - スワイプ操作でのOK/NG の確定時に、選択結果をテーブルに保存する。
+     - `sorting_state` の `selectionState`に選択結果を保存する。
+     - `sorting_state` の `selected_at` に選択日時を保存する。
+     - `actor_id`, `filename`, `shooting_date` をキーにして更新する。
 - **データ管理**:
-  - 画面で使用する選別ファイルは、被写体別に`{actor}_analysis.json`を使用する。
-    - 複数の被写体が同時に選別する可能性を考慮して被写体別に分ける。
-  - スコアリング後の選別データは`analysis.json`に纏める。
+  - 被写体の選別状態は MySQL データベース（`sorting_state` テーブル）に保存する。
   - データ整理時に、選別結果がOKの写真は確定済みフォルダに移動、NGの写真は削除する。
   - Scikit-learnの学習データは、各々の被写体に特化させる為に被写体別に分ける。
 - **保存アクション**: スワイプで OK/NG を即座に確定させる。
@@ -20,9 +23,6 @@
   - [スコアリング仕様](spec-scoring.md)
 - **データ整理**: スコアリング後にデータの整理を行う
   - [データ整理仕様](spec-finalize.md)
-- **スコアリングの安全な書き込み**: `src.scoring.main` 実行時、Pi 側の同時書き込みを考慮し、スコア計算後に `analysis.json` を再読み込みして差分チェックを行う。差分があれば `score` のみをマージして保存する。
-- **保存方法**: Raspberry Pi 上の Next.js が OneDrive マウント先の `{actor}_analysis.json` を直接読み書きする。
-- **データ連携**: Mac と Raspberry Pi の両方に OneDrive をマウントし、ファイルシステムを共有する。
 - **外部アクセス**: Cloudflare Tunnel を使用して iPhone（外出先）から Raspberry Pi に安全にアクセスする。
 - **選別基準**: 演者の主観を最優先とする。スコアリングはソート・フィルタリングの補助指標として利用する。
 - **撮影日管理**: 選別結果に撮影日（`shootingDate`）を含める。EXIF から取得し `YYYY-MM-DD` 形式で保存する。同名ファイルでも撮影日が異なる場合は別エントリとして管理する。
@@ -30,6 +30,8 @@
 ## UI/UX
 
 - 被写体ページの先頭に「← NG | ピンチで拡大 | OK →」の説明バーを表示する。
+- 次の写真が見えないようにする。
+  - 横長写真の場合、次の写真が見えてしまう。
 - iPhone で片手で高速に OK/NG を選択できるスワイプ UI（右: OK、左: NG）。
 - ピンチイン/アウトで写真の拡大/縮小、拡大中は 1 本指で上下左右パン移動ができる。
 - ズーム中はスワイプを無効化し、誤操作を防ぐ。
@@ -44,11 +46,32 @@ Next.js（Pi）と Python 解析スクリプト（Mac）で環境依存の部分
 
 | 変数名 | 説明 |
 | --- | --- |
-| `PROJECT_ROOT` | プロジェクトのベースディレクトリ |
-| `ONE_DRIVE_ROOT` | OneDriveのベースディレクトリ |
+| `PROJECT_ROOT` | プロジェクトのベースディレクトリ（Pi 側で使用） |
+| `DATA_ROOT` | データディレクトリの絶対パス（Mac 側で使用。`PROJECT_ROOT` 外に配置可能） |
+| `ANALYZE_ROOT` | 解析作業ディレクトリの絶対パス（Mac 側で使用。`PROJECT_ROOT` 外に配置可能。解析完了後に `DATA_ROOT` へ手動で一括移動） |
+| `MYSQL_HOST` | MySQL ホスト名 |
+| `MYSQL_PORT` | MySQL ポート番号 |
+| `MYSQL_USER` | MySQL ユーザー名 |
+| `MYSQL_PASSWORD` | MySQL パスワード |
+| `MYSQL_DATABASE` | MySQL データベース名 |
 
-**設定例:**
+**設定例（Mac）:**
+```bash
+DATA_ROOT=/Volumes/PiShare/data
+ANALYZE_ROOT=/tmp/livephoto_analyze
+MYSQL_HOST=raspberrypi.local
+MYSQL_PORT=3306
+MYSQL_USER=livephoto
+MYSQL_PASSWORD=secret
+MYSQL_DATABASE=livephoto
+```
+
+**設定例（Pi）:**
 ```bash
 PROJECT_ROOT=/path/to/LivePhotoSelector
-ONE_DRIVE_ROOT=/path/to/LivePhotoSelector
+MYSQL_HOST=localhost
+MYSQL_PORT=3306
+MYSQL_USER=livephoto
+MYSQL_PASSWORD=secret
+MYSQL_DATABASE=livephoto
 ```

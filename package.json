@@ -10,7 +10,9 @@
     "test": "vitest run --coverage"
   },
   "dependencies": {
+    "drizzle-orm": "^0.45.2",
     "framer-motion": "^12.7.4",
+    "mysql2": "^3.22.0",
     "next": "15.3.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"

@@ -1,5 +1,6 @@
 import path from "path";
 import Link from "next/link";
+import { createPool, createDb } from "@/lib/db";
 import { LocalAnalysisRepository } from "@/lib/repositories/LocalAnalysisRepository";
 
 // ローカル FS を毎リクエスト読み込むため静的生成を無効化する
@@ -7,13 +8,14 @@ export const dynamic = "force-dynamic";
 
 /**
  * トップページ（Server Component）
- * OneDrive の data ディレクトリを読み取り、被写体一覧を表示する
+ * MySQL の sorting_state テーブルを読み取り、被写体一覧を表示する
  */
 export default async function Home() {
-  const oneDriveRoot = process.env.ONE_DRIVE_ROOT ?? "";
+  const pool = createPool();
+  const db = createDb(pool);
   const repo = new LocalAnalysisRepository(
-    path.join(oneDriveRoot, "data"),
-    path.join(oneDriveRoot, "images")
+    db,
+    path.join(process.env.PROJECT_ROOT ?? "", "images")
   );
   const actors = await repo.getActors();
 

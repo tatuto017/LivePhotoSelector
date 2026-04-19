@@ -282,12 +282,14 @@ class TestAnalyze:
         img_path = tmp_path / "img.jpg"
         img_path.touch()
 
-        with patch(
-            "src.analysis.analyzer_subprocess._load_image_array",
-            side_effect=OSError("cannot open image"),
-        ):
-            with pytest.raises(OSError, match="cannot open image"):
-                analyze(img_path, "actor_a")
+        mock_module = MagicMock()
+        with patch.dict("sys.modules", {"deepface": mock_module}):
+            with patch(
+                "src.analysis.analyzer_subprocess._load_image_array",
+                side_effect=OSError("cannot open image"),
+            ):
+                with pytest.raises(OSError, match="cannot open image"):
+                    analyze(img_path, "actor_a")
 
 
 # ---------------------------------------------------------------------------

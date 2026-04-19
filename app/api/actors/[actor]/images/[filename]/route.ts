@@ -1,5 +1,6 @@
 import path from "path";
 import { NextRequest, NextResponse } from "next/server";
+import { createPool, createDb } from "@/lib/db";
 import { LocalAnalysisRepository } from "@/lib/repositories/LocalAnalysisRepository";
 
 /** 拡張子から Content-Type を決定するマッピング */
@@ -22,10 +23,11 @@ export async function GET(
   const { actor, filename } = await params;
   const decodedFilename = decodeURIComponent(filename);
 
-  const oneDriveRoot = process.env.ONE_DRIVE_ROOT ?? "";
+  const pool = createPool();
+  const db = createDb(pool);
   const repo = new LocalAnalysisRepository(
-    path.join(oneDriveRoot, "data"),
-    path.join(oneDriveRoot, "images")
+    db,
+    path.join(process.env.PROJECT_ROOT ?? "", "data", "images")
   );
 
   const buffer = await repo.readImageFile(actor, decodedFilename);

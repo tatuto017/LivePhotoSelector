@@ -1,8 +1,14 @@
 """DeepFace による写真解析スクリプト。
 
-INBOX_ROOT/{actor}/ の写真を DeepFace で解析し、
-analysis.pki に解析結果を保存して inbox → images へ移動する。
-{actor}_analysis.json を更新する。
+ANALYZE_ROOT/{actor}/ の写真を DeepFace で解析し、
+analysis_records・sorting_state テーブルに結果を保存する。
+
+解析対象ファイルはファイルシステムから直接取得する。
+sorting_state に既に存在するファイルはスキップするため、
+OOM Kill 後に再起動しても安全に途中から再開できる。
+
+写真ファイルは解析後も ANALYZE_ROOT に留め、
+全解析完了後に手動でのファイル移動（ANALYZE_ROOT → DATA_ROOT/images/）を促す。
 
 Usage:
     python -m src.analysis.main
@@ -14,11 +20,10 @@ import argparse
 import json
 import math
 import os
-import pickle
-import shutil
 import subprocess
 import sys
-import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -27,7 +32,11 @@ from typing import Optional
 from PIL import Image
 from PIL.ExifTags import TAGS
 from dotenv import load_dotenv
+from sqlalchemy import create_engine, select, insert, distinct
+from sqlalchemy.engine import Engine
 from tqdm import tqdm
+
+from src.db_schema import analysis_records, sorting_state
 
 
 # ---------------------------------------------------------------------------
@@ -37,7 +46,7 @@ from tqdm import tqdm
 
 @dataclass
 class AnalysisRecord:
-    """analysis.pki に格納する 1 件の DeepFace 解析データ。"""
+    """analysis_records テーブルに格納する 1 件の DeepFace 解析データ。"""
 
     actor: str
     filename: str
@@ -56,7 +65,7 @@ class AnalysisRecord:
 
 @dataclass
 class AnalysisEntry:
-    """{actor}_analysis.json に格納する 1 件の選別データ。"""
+    """sorting_state テーブルに格納する 1 件の選別データ。"""
 
     filename: str
     shootingDate: str
@@ -73,6 +82,21 @@ class AnalysisEntry:
 def _load_env() -> None:
     """プロジェクトルートの .env を読み込む。既存の環境変数は上書きしない。"""
     load_dotenv(override=False)
+
+
+def _create_engine() -> Engine:
+    """環境変数から SQLAlchemy エンジンを生成する。
+
+    Returns:
+        SQLAlchemy Engine（PyMySQL ドライバー使用）。
+    """
+    host = os.environ["MYSQL_HOST"]
+    port = os.environ.get("MYSQL_PORT", "3306")
+    user = os.environ["MYSQL_USER"]
+    password = os.environ["MYSQL_PASSWORD"]
+    database = os.environ["MYSQL_DATABASE"]
+    url = f"mysql+pymysql://{user}:{password}@{host}:{port}/{database}"
+    return create_engine(url)
 
 
 # ---------------------------------------------------------------------------
@@ -132,95 +156,128 @@ def _calculate_face_angle(left_eye: list, right_eye: list) -> float:
 
 
 class AnalysisRepository:
-    """analysis.pki と {actor}_analysis.json の読み書きを担う。"""
+    """analysis_records テーブルへの読み書きと sorting_state テーブルへの INSERT を担う。"""
 
-    def __init__(self, project_root: Path, one_drive_root: Path) -> None:
+    def __init__(self, engine: Engine) -> None:
         """初期化。
 
         Args:
-            project_root: プロジェクトルートディレクトリ。
-            one_drive_root: OneDrive ルートディレクトリ。
+            engine: SQLAlchemy Engine。
         """
-        self._pki_path = one_drive_root / "data" / "analysis.pki"
-        self._data_dir = one_drive_root / "data"
+        self._engine = engine
 
     def loadRecords(self) -> list:
-        """analysis.pki から解析レコードを読み込む。
+        """analysis_records テーブルから全解析レコードを読み込む。
 
         Returns:
-            AnalysisRecord のリスト。ファイルが存在しない場合は空リスト。
+            AnalysisRecord のリスト。レコードが存在しない場合は空リスト。
         """
-        if not self._pki_path.exists():
-            return []
-        with open(self._pki_path, "rb") as f:
-            return pickle.load(f)
-
-    def saveRecords(self, records: list) -> None:
-        """解析レコードを analysis.pki にアトミックに保存する。
-
-        一時ファイルに書き込んでからリネームすることで、
-        プロセス強制終了時のファイル破損を防ぐ。
-
-        Args:
-            records: AnalysisRecord のリスト。
-        """
-        self._pki_path.parent.mkdir(parents=True, exist_ok=True)
-        dir_ = self._pki_path.parent
-        with tempfile.NamedTemporaryFile("wb", dir=dir_, delete=False) as tmp:
-            pickle.dump(records, tmp)
-            tmp_path = tmp.name
-        shutil.move(tmp_path, self._pki_path)
-
-    def loadActorEntries(self, actor: str) -> list:
-        """{actor}_analysis.json から選別エントリを読み込む。
-
-        JSON が破損している場合は空リストを返して警告を出す。
-
-        Args:
-            actor: 被写体 ID。
-
-        Returns:
-            AnalysisEntry のリスト。ファイルが存在しない場合は空リスト。
-        """
-        path = self._data_dir / f"{actor}_analysis.json"
-        if not path.exists():
-            return []
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            return [AnalysisEntry(**entry) for entry in data]
-        except (json.JSONDecodeError, KeyError) as e:
-            print(f"[WARN] {path} の読み込みに失敗しました（破損の可能性）: {e}")
-            return []
-
-    def saveActorEntries(self, actor: str, entries: list) -> None:
-        """{actor}_analysis.json に選別エントリをアトミックに保存する。
-
-        一時ファイルに書き込んでからリネームすることで、
-        プロセス強制終了時のファイル破損を防ぐ。
-
-        Args:
-            actor: 被写体 ID。
-            entries: AnalysisEntry のリスト。
-        """
-        self._data_dir.mkdir(parents=True, exist_ok=True)
-        path = self._data_dir / f"{actor}_analysis.json"
-        data = [
-            {
-                "filename": e.filename,
-                "shootingDate": e.shootingDate,
-                "score": e.score,
-                "selectionState": e.selectionState,
-                "selectedAt": e.selectedAt,
-            }
-            for e in entries
+        stmt = select(
+            analysis_records.c.actor,
+            analysis_records.c.filename,
+            analysis_records.c.shooting_date,
+            analysis_records.c.angry,
+            analysis_records.c.fear,
+            analysis_records.c.happy,
+            analysis_records.c.sad,
+            analysis_records.c.surprise,
+            analysis_records.c.disgust,
+            analysis_records.c.neutral,
+            analysis_records.c.face_angle,
+            analysis_records.c.is_occluded,
+            analysis_records.c.face_embedding,
+        )
+        with self._engine.connect() as conn:
+            rows = conn.execute(stmt).fetchall()
+        return [
+            AnalysisRecord(
+                actor=row.actor,
+                filename=row.filename,
+                shootingDate=str(row.shooting_date),
+                angry=row.angry,
+                fear=row.fear,
+                happy=row.happy,
+                sad=row.sad,
+                surprise=row.surprise,
+                disgust=row.disgust,
+                neutral=row.neutral,
+                faceAngle=row.face_angle,
+                isOccluded=bool(row.is_occluded),
+                face_embedding=json.loads(row.face_embedding)
+                if isinstance(row.face_embedding, str)
+                else row.face_embedding,
+            )
+            for row in rows
         ]
-        with tempfile.NamedTemporaryFile(
-            "w", dir=self._data_dir, delete=False, encoding="utf-8", suffix=".json"
-        ) as tmp:
-            json.dump(data, tmp, ensure_ascii=False, indent=2)
-            tmp_path = tmp.name
-        shutil.move(tmp_path, path)
+
+    def loadProcessedKeys(self) -> set:
+        """sorting_state テーブルから処理済み (actor_id, filename) ペアを返す。
+
+        OOM Kill 後の再起動時に既処理ファイルをスキップするために使用する。
+        DeepFace 解析に失敗したファイルも sorting_state に登録されるため、
+        analysis_records ではなく sorting_state を参照する。
+
+        Returns:
+            処理済み (actor_id, filename) のセット。
+        """
+        stmt = select(
+            sorting_state.c.actor_id,
+            sorting_state.c.filename,
+        )
+        with self._engine.connect() as conn:
+            rows = conn.execute(stmt).fetchall()
+        return {(row.actor_id, row.filename) for row in rows}
+
+    def insertRecord(self, record: AnalysisRecord) -> None:
+        """解析レコードを analysis_records テーブルに INSERT する。
+
+        同一 (actor, filename) が既に存在する場合はスキップする
+        （INSERT IGNORE によりプロセス再起動後の継続に対応）。
+
+        Args:
+            record: 挿入する AnalysisRecord。
+        """
+        stmt = insert(analysis_records).prefix_with("IGNORE").values(
+            actor=record.actor,
+            filename=record.filename,
+            shooting_date=record.shootingDate,
+            angry=record.angry,
+            fear=record.fear,
+            happy=record.happy,
+            sad=record.sad,
+            surprise=record.surprise,
+            disgust=record.disgust,
+            neutral=record.neutral,
+            face_angle=record.faceAngle,
+            is_occluded=1 if record.isOccluded else 0,
+            face_embedding=json.dumps(record.face_embedding),
+        )
+        with self._engine.connect() as conn:
+            conn.execute(stmt)
+            conn.commit()
+
+    def insertEntry(self, actor: str, entry: AnalysisEntry) -> None:
+        """sorting_state テーブルに解析エントリを INSERT する。
+
+        同一 (actor_id, filename, shooting_date) が既に存在する場合はスキップする
+        （INSERT IGNORE によりプロセス再起動後の継続に対応）。
+        public は初期値 FALSE のままとし、全解析完了後の --publish フェーズで更新する。
+
+        Args:
+            actor: 被写体 ID。
+            entry: 挿入する AnalysisEntry。
+        """
+        stmt = insert(sorting_state).prefix_with("IGNORE").values(
+            actor_id=actor,
+            filename=entry.filename,
+            shooting_date=entry.shootingDate,
+            score=entry.score,
+            selection_state=entry.selectionState,
+            selected_at=entry.selectedAt,
+        )
+        with self._engine.connect() as conn:
+            conn.execute(stmt)
+            conn.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -296,60 +353,6 @@ class PhotoAnalyzer:
 
 
 # ---------------------------------------------------------------------------
-# 写真移動器
-# ---------------------------------------------------------------------------
-
-
-class PhotoMover:
-    """写真の inbox→images 移動・confirmed 移動・削除を担う。"""
-
-    def __init__(self, one_drive_root: Path) -> None:
-        """初期化。
-
-        Args:
-            one_drive_root: OneDrive ルートディレクトリ。
-        """
-        self._inbox_root = one_drive_root / "inbox"
-        self._images_root = one_drive_root / "images"
-        self._confirmed_root = one_drive_root / "confirmed"
-
-    def moveToImages(self, actor: str, filename: str) -> None:
-        """写真を inbox/{actor}/ から images/{actor}/ へ移動する。
-
-        Args:
-            actor: 被写体 ID。
-            filename: ファイル名。
-        """
-        src = self._inbox_root / actor / filename
-        dst_dir = self._images_root / actor
-        dst_dir.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(src), str(dst_dir / filename))
-
-    def moveToConfirmed(self, actor: str, filename: str) -> None:
-        """写真を images/{actor}/ から confirmed/{actor}/ へ移動する。
-
-        Args:
-            actor: 被写体 ID。
-            filename: ファイル名。
-        """
-        src = self._images_root / actor / filename
-        dst_dir = self._confirmed_root / actor
-        dst_dir.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(src), str(dst_dir / filename))
-
-    def deleteFromImages(self, actor: str, filename: str) -> None:
-        """images/{actor}/ から写真を削除する。ファイルが無い場合は何もしない。
-
-        Args:
-            actor: 被写体 ID。
-            filename: ファイル名。
-        """
-        path = self._images_root / actor / filename
-        if path.exists():
-            path.unlink()
-
-
-# ---------------------------------------------------------------------------
 # メイン処理
 # ---------------------------------------------------------------------------
 
@@ -358,9 +361,9 @@ def run(
     mode: str = "analyze",
     analyzer: Optional[PhotoAnalyzer] = None,
     repository: Optional[AnalysisRepository] = None,
-    mover: Optional[PhotoMover] = None,
-    project_root: Optional[Path] = None,
-    one_drive_root: Optional[Path] = None,
+    analyze_root: Optional[Path] = None,
+    engine: Optional[Engine] = None,
+    max_workers: int = 2,
 ) -> None:
     """メイン処理を実行する。
 
@@ -368,25 +371,23 @@ def run(
         mode: 実行モード。"analyze" / "scoring" / "finalize" のいずれか。
         analyzer: PhotoAnalyzer インスタンス（DI 用）。
         repository: AnalysisRepository インスタンス（DI 用）。
-        mover: PhotoMover インスタンス（DI 用）。
-        project_root: プロジェクトルートパス（DI 用）。
-        one_drive_root: OneDrive ルートパス（DI 用）。
+        analyze_root: 解析作業ディレクトリのパス（DI 用）。省略時は ANALYZE_ROOT 環境変数を使用。
+        engine: SQLAlchemy Engine（DI 用）。
+        max_workers: 並列処理の最大ワーカー数（DI 用）。デフォルトは 2。
     """
     _load_env()
 
-    if project_root is None:
-        project_root = Path(os.environ["PROJECT_ROOT"])
-    if one_drive_root is None:
-        one_drive_root = Path(os.environ["ONE_DRIVE_ROOT"])
+    if analyze_root is None:
+        analyze_root = Path(os.environ["ANALYZE_ROOT"])
+    if engine is None:
+        engine = _create_engine()
     if repository is None:
-        repository = AnalysisRepository(project_root, one_drive_root)
-    if mover is None:
-        mover = PhotoMover(one_drive_root)
+        repository = AnalysisRepository(engine)
     if analyzer is None:
         analyzer = PhotoAnalyzer()
 
     if mode == "analyze":
-        _run_analyze(one_drive_root, analyzer, repository, mover)
+        _run_analyze(analyze_root, analyzer, repository, max_workers=max_workers)
     elif mode == "scoring":
         _run_scoring()
     elif mode == "finalize":
@@ -394,98 +395,117 @@ def run(
 
 
 def _run_analyze(
-    one_drive_root: Path,
+    analyze_root: Path,
     analyzer: PhotoAnalyzer,
     repository: AnalysisRepository,
-    mover: PhotoMover,
+    max_workers: int = 2,
 ) -> None:
-    """INBOX_ROOT/{actor}/ の写真を解析し、analysis.pki と {actor}_analysis.json を更新する。
+    """ANALYZE_ROOT/{actor}/ の写真をファイルシステムから取得して並列解析し、DB を更新する。
+
+    写真ファイルは ANALYZE_ROOT に留め、ファイル移動は行わない。
+    全解析完了後に手動でのファイル移動（ANALYZE_ROOT → DATA_ROOT/images/）を促す。
 
     処理フロー:
-    1. INBOX_ROOT 配下の actor ディレクトリを走査する。
-    2. 各画像を DeepFace で解析して AnalysisRecord を作成・追記する。
-    3. {actor}_analysis.json に AnalysisEntry を追記する（初期 score は最大感情スコア）。
-    4. 写真を inbox → images へ移動する。
-    5. analysis.pki を保存する。
+    1. ANALYZE_ROOT 直下の被写体ディレクトリを列挙する。
+    2. 各被写体ディレクトリ内のファイルを列挙する。
+    3. sorting_state に既に存在するファイルはスキップする（OOM 後の再起動対応）。
+    4. 未処理画像を ThreadPoolExecutor で並列に DeepFace 解析する。
+    5. DB への書き込みはロックで保護してスレッドセーフを確保する。
 
     Args:
-        one_drive_root: OneDrive ルートディレクトリ。
+        analyze_root: 解析作業ディレクトリ（{actor}/ サブディレクトリを含む）。
         analyzer: PhotoAnalyzer インスタンス。
         repository: AnalysisRepository インスタンス。
-        mover: PhotoMover インスタンス。
+        max_workers: 並列処理の最大ワーカー数（Raspberry Pi 4 では 2 を推奨）。
     """
-    inbox_root = one_drive_root / "inbox"
-    if not inbox_root.exists():
-        print(f"[INFO] Inbox not found: {inbox_root}")
+    if not analyze_root.exists():
+        print(f"[INFO] ANALYZE_ROOT が存在しません: {analyze_root}")
         return
 
-    records = repository.loadRecords()
-    # 重複チェック用セット (actor, filename)
-    existing_keys = {(r.actor, r.filename) for r in records}
+    # 被写体ディレクトリ一覧をソート順で取得
+    actor_dirs = sorted([d for d in analyze_root.iterdir() if d.is_dir()])
+    if not actor_dirs:
+        print("[INFO] ANALYZE_ROOT に被写体ディレクトリが見つかりません。")
+        return
 
-    for actor_dir in sorted(inbox_root.iterdir()):
-        if not actor_dir.is_dir():
-            continue
+    # analysis_records の重複 INSERT 防止用セット (actor, filename)
+    existing_keys = {(r.actor, r.filename) for r in repository.loadRecords()}
+    # sorting_state 処理済みキー（再解析スキップ用）
+    processed_keys = repository.loadProcessedKeys()
+
+    # 全ファイルを収集（被写体 → ファイル名 順にソート）
+    all_entries = []
+    for actor_dir in actor_dirs:
         actor = actor_dir.name
+        for file_path in sorted(actor_dir.iterdir()):
+            if file_path.is_file():
+                all_entries.append((actor, file_path.name, file_path))
 
-        entries = repository.loadActorEntries(actor)
-        existing_filenames = {e.filename for e in entries}
+    if not all_entries:
+        print("[INFO] 解析対象ファイルが見つかりません。")
+        return
 
-        # 対象拡張子の画像ファイルを取得
-        img_files = sorted(
-            f
-            for f in actor_dir.iterdir()
-            if f.is_file() and f.suffix.lower() in {".jpg", ".jpeg", ".png"}
+    # sorting_state に既に存在するファイルを除外して未処理のみに絞る（OOM 後の再起動対応）
+    pending_entries = [
+        (actor, filename, img_path)
+        for actor, filename, img_path in all_entries
+        if (actor, filename) not in processed_keys
+    ]
+
+    # スレッド間で共有する状態（existing_keys・processed_keys・DB）を保護するロック
+    lock = threading.Lock()
+
+    def _process_one(actor: str, filename: str, img_path: Path) -> None:
+        """1 枚の画像を解析し、ロックを取得してから DB に書き込む。
+
+        analyzer.analyze() はサブプロセスを起動するため並列実行による CPU バウンドは発生しない。
+        DB 書き込みと共有キャッシュの更新のみロックで保護する。
+
+        Args:
+            actor: 被写体 ID。
+            filename: ファイル名。
+            img_path: 画像ファイルのパス。
+        """
+        record = analyzer.analyze(img_path, actor)
+
+        # 初期 score: DeepFace の最大感情スコア (0〜1)
+        score: Optional[float] = None
+        if record is not None:
+            max_val = max(
+                record.angry,
+                record.fear,
+                record.happy,
+                record.sad,
+                record.surprise,
+                record.disgust,
+                record.neutral,
+            )
+            score = round(float(max_val) / 100.0, 4)
+
+        shooting_date = (
+            record.shootingDate if record is not None else _get_shooting_date(img_path)
         )
+        entry = AnalysisEntry(filename=filename, shootingDate=shooting_date, score=score)
 
-        for img_path in tqdm(img_files, desc=f"[{actor}]", unit="枚"):
-            filename = img_path.name
-            print(f"[INFO] Analyzing {actor}/{filename} ...")
-
-            record = analyzer.analyze(img_path, actor)
-
-            # 新規レコードのみ追加
+        # DB 書き込みと共有キャッシュ更新はロックで保護する
+        with lock:
             if record is not None and (actor, filename) not in existing_keys:
-                records.append(record)
+                repository.insertRecord(record)
                 existing_keys.add((actor, filename))
+            repository.insertEntry(actor, entry)
+            processed_keys.add((actor, filename))
 
-            # 初期 score: DeepFace の最大感情スコア (0〜1)
-            score: Optional[float] = None
-            if record is not None:
-                max_val = max(
-                    record.angry,
-                    record.fear,
-                    record.happy,
-                    record.sad,
-                    record.surprise,
-                    record.disgust,
-                    record.neutral,
-                )
-                score = round(float(max_val) / 100.0, 4)
-
-            # 新規エントリのみ追加
-            if filename not in existing_filenames:
-                shooting_date = (
-                    record.shootingDate
-                    if record is not None
-                    else _get_shooting_date(img_path)
-                )
-                entries.append(
-                    AnalysisEntry(
-                        filename=filename,
-                        shootingDate=shooting_date,
-                        score=score,
-                    )
-                )
-                existing_filenames.add(filename)
-
-            # 移動前に pki・json を保存してデータ整合性を保つ。
-            # OOM 等でプロセスが強制終了されても再起動時に続きから再開できる。
-            repository.saveRecords(records)
-            repository.saveActorEntries(actor, entries)
-
-            # inbox → images へ移動
-            mover.moveToImages(actor, filename)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(_process_one, actor, filename, img_path): (actor, filename)
+            for actor, filename, img_path in pending_entries
+        }
+        for future in tqdm(as_completed(futures), total=len(pending_entries), desc="解析", unit="枚"):
+            try:
+                future.result()
+            except Exception as e:
+                actor_name, fname = futures[future]
+                print(f"[WARN] Error processing {actor_name}/{fname}: {e}")
 
     print("[INFO] Analysis complete.")
 
@@ -517,6 +537,12 @@ def main() -> None:
         action="store_true",
         help="写真整理（OK → confirmed 移動、NG → 削除）を実行する",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=2,
+        help="並列処理の最大ワーカー数（Raspberry Pi 4 では 2 を推奨、デフォルト: 2）",
+    )
     args = parser.parse_args()
 
     if args.scoring:
@@ -524,7 +550,7 @@ def main() -> None:
     elif args.finalize:
         run(mode="finalize")
     else:
-        run(mode="analyze")
+        run(mode="analyze", max_workers=args.workers)
 
 
 if __name__ == "__main__":  # pragma: no cover

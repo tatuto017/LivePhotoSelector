@@ -8,7 +8,7 @@ export type SelectionState = "ok" | "ng" | "pending";
 
 /**
  * 写真データの型
- * {actor}_analysis.json の各エントリに対応する
+ * sorting_state テーブルの各レコードに対応する
  */
 export interface Photo {
   /** 画像ファイル名 */

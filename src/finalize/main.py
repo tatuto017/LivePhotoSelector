@@ -1,23 +1,27 @@
 """データ整理スクリプト。
 
-スコアリング後に {actor}_analysis.json の選別結果に基づいてデータ整理を行う。
+フェーズ1（--publish）: 解析完了・手動でのファイル移動後に sorting_state.public を true に更新する。
+  ファイルの移動（ANALYZE_ROOT → DATA_ROOT/images/）は事前に手動で実施済みであること。
 
-処理フロー:
-1. {actor}_analysis.json の選別結果が ok の写真を confirmed/ へ移動する。
-2. {actor}_analysis.json の選別結果が ng の写真を削除する。
-3. ok / ng エントリを {actor}_analysis.json から analysis.json に移動する。
+フェーズ2（デフォルト）: 選別後に sorting_state の selection_state に基づいて
+  ok 写真を confirmed/ へ移動し、ng 写真を削除する。
 
 Usage:
-    python -m src.finalize.main
+    python -m src.finalize.main --publish   # フェーズ1: 公開処理
+    python -m src.finalize.main             # フェーズ2: 選別後整理
 """
 
-import json
+import argparse
 import os
 import shutil
 from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
+from sqlalchemy import create_engine, delete, select, update
+from sqlalchemy.engine import Engine
+
+from src.db_schema import sorting_state
 
 
 # ---------------------------------------------------------------------------
@@ -30,108 +34,142 @@ def _load_env() -> None:
     load_dotenv(override=False)
 
 
+def _create_engine() -> Engine:
+    """環境変数から SQLAlchemy エンジンを生成する。
+
+    Returns:
+        SQLAlchemy Engine（PyMySQL ドライバー使用）。
+    """
+    host = os.environ["MYSQL_HOST"]
+    port = os.environ.get("MYSQL_PORT", "3306")
+    user = os.environ["MYSQL_USER"]
+    password = os.environ["MYSQL_PASSWORD"]
+    database = os.environ["MYSQL_DATABASE"]
+    url = f"mysql+pymysql://{user}:{password}@{host}:{port}/{database}"
+    return create_engine(url)
+
+
 # ---------------------------------------------------------------------------
 # データ整理リポジトリ
 # ---------------------------------------------------------------------------
 
 
 class FinalizeRepository:
-    """{actor}_analysis.json と analysis.json の読み書きを担う。"""
+    """sorting_state テーブルの読み書きを担う。"""
 
-    def __init__(self, project_root: Path, one_drive_root: Path) -> None:
+    def __init__(self, engine: Engine) -> None:
         """初期化。
 
         Args:
-            project_root: プロジェクトルートディレクトリ。
-            one_drive_root: OneDrive ルートディレクトリ。
+            engine: SQLAlchemy Engine。
         """
-        self._analysis_json_path = one_drive_root / "data" / "analysis.json"
-        self._data_dir = one_drive_root / "data"
+        self._engine = engine
 
     def getActors(self) -> list:
-        """OneDrive data ディレクトリ内の被写体 ID 一覧を返す。
-
-        {actor}_analysis.json ファイル名から被写体 ID を取得する。
+        """sorting_state テーブルから被写体 ID 一覧を返す。
 
         Returns:
-            被写体 ID のリスト（ソート済み）。ディレクトリが存在しない場合は空リスト。
+            被写体 ID のリスト（ソート済み）。
         """
-        if not self._data_dir.exists():
-            return []
-        actors = []
-        for p in sorted(self._data_dir.glob("*_analysis.json")):
-            actor = p.stem.replace("_analysis", "")
-            actors.append(actor)
-        return actors
+        stmt = (
+            select(sorting_state.c.actor_id)
+            .distinct()
+            .order_by(sorting_state.c.actor_id)
+        )
+        with self._engine.connect() as conn:
+            rows = conn.execute(stmt).fetchall()
+        return [row.actor_id for row in rows]
 
-    def loadActorEntries(self, actor: str) -> list:
-        """{actor}_analysis.json から選別エントリを raw dict として読み込む。
+    def loadFinalizedEntries(self, actor: str) -> list:
+        """sorting_state テーブルから ok / ng の処理対象エントリを返す。
 
         Args:
             actor: 被写体 ID。
 
         Returns:
-            エントリの dict リスト。ファイルが存在しない場合は空リスト。
+            ok または ng のエントリの dict リスト。
         """
-        path = self._data_dir / f"{actor}_analysis.json"
-        if not path.exists():
-            return []
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+        stmt = (
+            select(
+                sorting_state.c.filename,
+                sorting_state.c.shooting_date,
+                sorting_state.c.score,
+                sorting_state.c.selection_state,
+                sorting_state.c.selected_at,
+            )
+            .where(
+                sorting_state.c.actor_id == actor,
+                sorting_state.c.selection_state.in_(["ok", "ng"]),
+            )
+            .order_by(sorting_state.c.filename)
+        )
+        with self._engine.connect() as conn:
+            rows = conn.execute(stmt).fetchall()
+        result = []
+        for row in rows:
+            result.append({
+                "filename": row.filename,
+                "shootingDate": str(row.shooting_date),
+                "score": float(row.score) if row.score is not None else None,
+                "selectionState": row.selection_state,
+                "selectedAt": str(row.selected_at) if row.selected_at is not None else None,
+            })
+        return result
 
-    def saveActorEntries(self, actor: str, entries: list) -> None:
-        """{actor}_analysis.json に選別エントリを保存する。
+    def deleteEntry(self, actor: str, filename: str, shootingDate: str) -> None:
+        """sorting_state テーブルからエントリを削除する。
 
         Args:
             actor: 被写体 ID。
-            entries: エントリの dict リスト。
+            filename: ファイル名。
+            shootingDate: 撮影日 (YYYY-MM-DD)。
         """
-        self._data_dir.mkdir(parents=True, exist_ok=True)
-        path = self._data_dir / f"{actor}_analysis.json"
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(entries, f, ensure_ascii=False, indent=2)
+        stmt = delete(sorting_state).where(
+            sorting_state.c.actor_id == actor,
+            sorting_state.c.filename == filename,
+            sorting_state.c.shooting_date == shootingDate,
+        )
+        with self._engine.connect() as conn:
+            conn.execute(stmt)
+            conn.commit()
 
-    def loadAnalysisJson(self) -> dict:
-        """analysis.json を読み込む。
+    def updatePublic(self, actor: str) -> None:
+        """sorting_state テーブルの指定 actor の全エントリで public を true に更新する。
 
-        Returns:
-            actor → エントリリスト の辞書。ファイルが存在しない場合は空辞書。
-        """
-        if not self._analysis_json_path.exists():
-            return {}
-        with open(self._analysis_json_path, "r", encoding="utf-8") as f:
-            return json.load(f)
-
-    def saveAnalysisJson(self, data: dict) -> None:
-        """analysis.json を保存する。
+        手動でのファイル移動（ANALYZE_ROOT → DATA_ROOT/images/）完了後に呼び出す。
 
         Args:
-            data: actor → エントリリスト の辞書。
+            actor: 被写体 ID。
         """
-        self._analysis_json_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self._analysis_json_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        stmt = (
+            update(sorting_state)
+            .where(sorting_state.c.actor_id == actor)
+            .values(public=True)
+        )
+        with self._engine.connect() as conn:
+            conn.execute(stmt)
+            conn.commit()
 
 
 # ---------------------------------------------------------------------------
-# 写真整理器
+# 写真整理器（フェーズ2）
 # ---------------------------------------------------------------------------
 
 
 class PhotoFinalizer:
     """写真の confirmed 移動・削除を担う。"""
 
-    def __init__(self, one_drive_root: Path) -> None:
+    def __init__(self, data_root: Path) -> None:
         """初期化。
 
         Args:
-            one_drive_root: OneDrive ルートディレクトリ。
+            data_root: データルートディレクトリ（images/confirmed を含む）。
         """
-        self._images_root = one_drive_root / "images"
-        self._confirmed_root = one_drive_root / "confirmed"
+        self._images_root = data_root / "images"
+        self._confirmed_root = data_root / "confirmed"
 
     def moveToConfirmed(self, actor: str, filename: str) -> None:
-        """写真を images/{actor}/ から confirmed/{actor}/ へ移動する。
+        """写真を data/images/{actor}/ から data/confirmed/{actor}/ へ移動する。
 
         Args:
             actor: 被写体 ID。
@@ -143,7 +181,7 @@ class PhotoFinalizer:
         shutil.move(str(src), str(dst_dir / filename))
 
     def deleteFromImages(self, actor: str, filename: str) -> None:
-        """images/{actor}/ から写真を削除する。ファイルが無い場合は何もしない。
+        """data/images/{actor}/ から写真を削除する。ファイルが無い場合は何もしない。
 
         Args:
             actor: 被写体 ID。
@@ -160,66 +198,89 @@ class PhotoFinalizer:
 
 
 def run(
+    mode: str = "finalize",
     repository: Optional[FinalizeRepository] = None,
     finalizer: Optional[PhotoFinalizer] = None,
-    project_root: Optional[Path] = None,
-    one_drive_root: Optional[Path] = None,
+    data_root: Optional[Path] = None,
+    engine: Optional[Engine] = None,
 ) -> None:
     """データ整理のメイン処理。
 
-    全被写体に対してデータ整理を実行し、analysis.json を更新する。
+    mode='publish'  : フェーズ1 — sorting_state.public を true に更新する。
+                      ファイルの移動は事前に手動で実施済みであること。
+    mode='finalize' : フェーズ2 — 選別済み（ok/ng）エントリを整理する。
 
     Args:
+        mode: 実行モード。"publish" または "finalize"。
         repository: FinalizeRepository インスタンス（DI 用）。
         finalizer: PhotoFinalizer インスタンス（DI 用）。
-        project_root: プロジェクトルートパス（DI 用）。
-        one_drive_root: OneDrive ルートパス（DI 用）。
+        data_root: データルートパス（DI 用）。finalize モード時に使用。省略時は DATA_ROOT 環境変数を使用。
+        engine: SQLAlchemy Engine（DI 用）。
     """
     _load_env()
 
-    if project_root is None:
-        project_root = Path(os.environ["PROJECT_ROOT"])
-    if one_drive_root is None:
-        one_drive_root = Path(os.environ["ONE_DRIVE_ROOT"])
+    if engine is None:
+        engine = _create_engine()
     if repository is None:
-        repository = FinalizeRepository(project_root, one_drive_root)
-    if finalizer is None:
-        finalizer = PhotoFinalizer(one_drive_root)
+        repository = FinalizeRepository(engine)
 
+    if mode == "publish":
+        _run_publish(repository)
+    else:
+        if data_root is None:
+            data_root = Path(os.environ["DATA_ROOT"])
+        if finalizer is None:
+            finalizer = PhotoFinalizer(data_root)
+        actors = repository.getActors()
+        for actor in actors:
+            print(f"[INFO] Finalizing actor: {actor}")
+            _run_finalize_for_actor(actor, repository, finalizer)
+        print("[INFO] Finalize complete.")
+
+
+def _run_publish(repository: FinalizeRepository) -> None:
+    """フェーズ1: sorting_state の全エントリで public を true に更新する。
+
+    ファイルの移動（ANALYZE_ROOT → DATA_ROOT/images/）は事前に手動で実施済みであることを前提とする。
+    DB の public フラグを更新することで Web アプリ上で写真が表示対象になる。
+
+    処理フロー:
+    1. sorting_state から被写体 ID 一覧を取得する。
+    2. 被写体ごとに sorting_state.public を true に更新する。
+
+    Args:
+        repository: FinalizeRepository インスタンス。
+    """
     actors = repository.getActors()
-    analysis_data = repository.loadAnalysisJson()
+    if not actors:
+        print("[INFO] 公開対象の被写体が見つかりません。")
+        return
 
     for actor in actors:
-        print(f"[INFO] Finalizing actor: {actor}")
-        _run_finalize_for_actor(actor, repository, finalizer, analysis_data)
+        print(f"[INFO] Publishing actor: {actor}")
+        repository.updatePublic(actor)
+        print(f"[INFO] Updated public=true for {actor}")
 
-    repository.saveAnalysisJson(analysis_data)
-    print("[INFO] Finalize complete.")
+    print("[INFO] Publish complete.")
 
 
 def _run_finalize_for_actor(
     actor: str,
     repository: FinalizeRepository,
     finalizer: PhotoFinalizer,
-    analysis_data: dict,
 ) -> None:
     """被写体ごとのデータ整理処理。
 
     1. ok エントリ → images/ から confirmed/ へ移動
     2. ng エントリ → images/ から削除
-    3. ok / ng エントリを {actor}_analysis.json から analysis.json に移動
-    4. pending エントリのみ {actor}_analysis.json に残す
+    3. 処理済みエントリを sorting_state テーブルから削除
 
     Args:
         actor: 被写体 ID。
         repository: FinalizeRepository インスタンス。
         finalizer: PhotoFinalizer インスタンス。
-        analysis_data: analysis.json の内容（インプレースで更新する）。
     """
-    entries = repository.loadActorEntries(actor)
-
-    remaining = []
-    finalized_entries = []
+    entries = repository.loadFinalizedEntries(actor)
 
     for entry in entries:
         state = entry.get("selectionState")
@@ -227,28 +288,30 @@ def _run_finalize_for_actor(
             # ok: confirmed/ へ移動
             finalizer.moveToConfirmed(actor, entry["filename"])
             print(f"[INFO] Moved to confirmed: {actor}/{entry['filename']}")
-            finalized_entries.append(entry)
         elif state == "ng":
             # ng: images/ から削除
             finalizer.deleteFromImages(actor, entry["filename"])
             print(f"[INFO] Deleted: {actor}/{entry['filename']}")
-            finalized_entries.append(entry)
-        else:
-            # pending: 残す
-            remaining.append(entry)
 
-    # pending のみ {actor}_analysis.json に保存する
-    repository.saveActorEntries(actor, remaining)
+        # 処理済みエントリを DB から削除
+        repository.deleteEntry(actor, entry["filename"], entry["shootingDate"])
 
-    # ok / ng エントリを analysis.json に移動（重複排除）
-    if finalized_entries:
-        if actor not in analysis_data:
-            analysis_data[actor] = []
-        existing_filenames = {e["filename"] for e in analysis_data[actor]}
-        for entry in finalized_entries:
-            if entry["filename"] not in existing_filenames:
-                analysis_data[actor].append(entry)
+
+def main() -> None:
+    """CLI エントリポイント。引数を解析して run() を呼び出す。"""
+    parser = argparse.ArgumentParser(description="データ整理スクリプト")
+    parser.add_argument(
+        "--publish",
+        action="store_true",
+        help="フェーズ1: sorting_state.public を true に更新する（ファイル移動は手動で事前実施）",
+    )
+    args = parser.parse_args()
+
+    if args.publish:
+        run(mode="publish")
+    else:
+        run(mode="finalize")
 
 
 if __name__ == "__main__":  # pragma: no cover
-    run()
+    main()

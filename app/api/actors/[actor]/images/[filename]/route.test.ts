@@ -1,7 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { NextRequest } from "next/server";
 
-// LocalAnalysisRepository をモック化
+// lib/db と LocalAnalysisRepository をモック化
+vi.mock("@/lib/db", () => ({
+  createPool: vi.fn().mockReturnValue({}),
+  createDb: vi.fn().mockReturnValue({}),
+}));
 vi.mock("@/lib/repositories/LocalAnalysisRepository");
 import { LocalAnalysisRepository } from "@/lib/repositories/LocalAnalysisRepository";
 
@@ -21,7 +25,7 @@ describe("GET /api/actors/[actor]/images/[filename]", () => {
           readImageFile: mockReadImageFile,
         }) as unknown as LocalAnalysisRepository
     );
-    vi.stubEnv("ONE_DRIVE_ROOT", "/test/onedrive");
+    vi.stubEnv("PROJECT_ROOT", "/test/project");
   });
 
   it("JPEG 画像を image/jpeg Content-Type で返す", async () => {
@@ -122,8 +126,8 @@ describe("GET /api/actors/[actor]/images/[filename]", () => {
 
     // Assert
     expect(LocalAnalysisRepository).toHaveBeenCalledWith(
-      "/test/onedrive/data",
-      "/test/onedrive/images"
+      expect.anything(),
+      "/test/project/data/images"
     );
   });
 });

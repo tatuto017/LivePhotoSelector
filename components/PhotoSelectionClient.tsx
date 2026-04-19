@@ -3,6 +3,7 @@
 import { useMemo } from "react";
 import { Photo } from "@/lib/types";
 import { ResultRepository } from "@/lib/repositories/ResultRepository";
+import { PhotoRepository } from "@/lib/repositories/PhotoRepository";
 import { usePhotoSelection } from "@/hooks/usePhotoSelection";
 import { PhotoCard } from "@/components/PhotoCard";
 
@@ -24,9 +25,10 @@ export interface PhotoSelectionClientProps {
 
 /**
  * 写真選別画面のクライアントコンポーネント
- * - ResultRepository は Server Component から渡せないため useMemo でクライアント側でインスタンス化
+ * - ResultRepository・PhotoRepository は Server Component から渡せないため useMemo でクライアント側でインスタンス化
  * - 説明バー「← NG | ピンチで拡大 | OK →」を先頭に表示
  * - カードスタック形式で表示し、先頭 + PRELOAD_COUNT 枚を描画（画像先読み）
+ * - 先読み分は opacity:0 で不可視にし、横長写真の背後透過を防ぐ
  * - 全リトライ失敗時はエラーバナーを表示
  */
 export function PhotoSelectionClient({
@@ -34,10 +36,11 @@ export function PhotoSelectionClient({
   initialPhotos,
   retryDelayMs,
 }: PhotoSelectionClientProps) {
-  // ResultRepository はクラスインスタンスのため Server Component から props として渡せない
+  // ResultRepository・PhotoRepository はクラスインスタンスのため Server Component から props として渡せない
   const repository = useMemo(() => new ResultRepository(), []);
+  const photoRepository = useMemo(() => new PhotoRepository(), []);
   const { visiblePhotos, error, confirmPhoto, dismissError } =
-    usePhotoSelection(actor, initialPhotos, repository, retryDelayMs);
+    usePhotoSelection(actor, initialPhotos, repository, photoRepository, retryDelayMs);
 
   // 現在の写真 + 先読み分のみ描画
   const displayPhotos = visiblePhotos.slice(0, PRELOAD_COUNT + 1);
@@ -74,7 +77,8 @@ export function PhotoSelectionClient({
               className="absolute inset-0"
               style={{
                 zIndex: PRELOAD_COUNT - idx,
-                // 先読み分は視覚的に後ろに重なる
+                // 先読み分は不可視にする（横長写真の背後透過を防ぐ）
+                opacity: idx === 0 ? 1 : 0,
                 pointerEvents: idx === 0 ? "auto" : "none",
               }}
             >

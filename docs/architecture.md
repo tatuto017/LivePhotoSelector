@@ -2,8 +2,11 @@
 
 ## Server Component / Client Component 境界
 
-- **Server Component** (`page.tsx`): `LocalAnalysisRepository` を直接使用して FS から写真データを取得する。Server Component では相対 URL を使った `fetch()` が使えないため、HTTP 経由ではなく直接 FS 読み込みを行う。
-- **Client Component** (`PhotoSelectionClient.tsx`): `ResultRepository` はクラスインスタンスのため Server → Client の props として渡せない。`useMemo` でクライアント側にてインスタンス化する。
+- **Server Component** (`page.tsx`): `LocalAnalysisRepository` を直接使用して MariaDB から被写体・写真データを取得する。Server Component では相対 URL を使った `fetch()` が使えないため、HTTP 経由ではなく直接 DB 読み込みを行う。
+- **Client Component** (`PhotoSelectionClient.tsx`):
+  - `PhotoRepository`: pending 写真を API 経由でページネーション取得する（クライアントサイド HTTP）。
+  - `ResultRepository`: 選択結果を API 経由で保存する（クライアントサイド HTTP）。
+  - いずれもクラスインスタンスのため Server → Client の props として渡せない。`useMemo` でクライアント側にてインスタンス化する。
 
 ## スワイプとピンチズームの競合回避
 
@@ -18,26 +21,32 @@
 - 全リトライ失敗時のみ写真を再表示してエラーバナーを表示する。
 - テスト時は `retryDelayMs=0` を DI することで即時リトライを実現し、fake timer を使わない。
 
-## スコアリングの安全なマージ戦略
-
-スコア計算中に Pi 側が `{actor}_analysis.json` を更新している可能性があるため、以下の手順で競合を回避する:
-
-1. スコア計算前のスナップショットと、データ更新用でスナップショットをコピーする。
-2. スコアリング処理で、結果をデータ更新用ファイルに反映する。
-3. スナップショットと`{actor}_analysis.json`が同じなら、そのまま更新用ファイルを`{actor}_analysis.json`に上書きする。
-4. 差分あり（Pi が書き込んだ）なら、`{actor}_analysis.json`の`score` のみをマージして保存。
-
 ## Python の `.env` 読み込み
 
 - `python-dotenv` を使い、`run()` 冒頭で `_load_env()` を呼んで `.env` を読み込む（`override=False`）。
 - テスト時は `patch("src.analysis.main._load_env")` でスキップ可能。
 
-## データファイルの OneDrive 一元管理
+## データファイルの配置
 
-`analysis.json`・`analysis.pki`・`{actor}_model.joblib` の 3 ファイルを `{ONE_DRIVE_ROOT}/data/` に配置する。
+ファイルの用途に応じて `{DATA_ROOT}/`（Mac・Pi 共有マウント）に配置する。
+Mac 側は環境変数 `DATA_ROOT` で任意のパスを指定でき、`PROJECT_ROOT` 外に配置できる。
+解析結果は MariaDB の `analysis_records` テーブル、選択状態は `sorting_state` テーブルで管理する。
 
-- **理由**: Mac（解析・スコアリング実行環境）と Raspberry Pi（選別 UI 実行環境）の双方が OneDrive をマウントしているため、PROJECT_ROOT に置くと環境ごとに別ファイルになり同期が取れない。OneDrive に一元化することで両環境から同一ファイルを参照できる。
-- **影響**: `{PROJECT_ROOT}/data/` はローカル専用の一時ファイル等の用途に限定され、現時点では使用ファイルなし。
+| ファイル | 配置 | 用途 |
+| --- | --- | --- |
+| `{actor}_model.joblib` | `{DATA_ROOT}/` | 学習済みモデル（Mac でのみ使用） |
+| `inbox/file_list.txt` | `{DATA_ROOT}/inbox/` | 解析対象ファイル一覧（`{actor}/{filename}` 形式） |
+
+> `analysis.pki` は廃止。解析結果は MariaDB の `analysis_records` テーブルに永続化する。
+
+### 解析結果の DB 登録フロー
+
+Pi（選択 UI）は MariaDB の `sorting_state` テーブルを直接読み書きする。解析スクリプト側は以下の手順でデータを登録する。
+
+1. **写真移動**: `data/inbox → data/images` へ写真を移動する。
+2. **analysis_records INSERT（移動後）**: 解析レコードを `analysis_records` テーブルに INSERT する。同一 `(actor, filename)` が既に存在する場合はスキップする（INSERT IGNORE）。
+3. **sorting_state INSERT（移動後）**: 解析結果を `sorting_state` テーブルに INSERT する。同一 `(actor_id, filename, shootingDate)` のレコードが既に存在する場合はスキップする（プロセス再起動後の継続対応）。
+4. **file_list.txt 更新（DB 登録後）**: 処理済みエントリを `file_list.txt` からアトミックに削除する。
 
 ## OpenCV ヘッドレスモード
 
@@ -59,18 +68,19 @@ Raspberry Pi (QEMU x86_64 エミュレーション) は OOM Kill でプロセス
 
 ### 増分保存（per-image save）
 
-1 枚解析するたびに `analysis.pki` と `{actor}_analysis.json` を保存し、`inbox → images` への移動はその後に行う。OOM Kill 後に再起動しても既処理ファイルはスキップされ、続きから再開できる。
+1 枚解析するたびに以下を順番に実行し、OOM Kill 後に再起動しても続きから再開できる。
+
+1. `data/inbox → data/images` へ写真を移動する
+2. `analysis_records` テーブルに INSERT する（重複は INSERT IGNORE でスキップ）
+3. `sorting_state` テーブルに INSERT する（重複は INSERT IGNORE でスキップ）
+4. `file_list.txt` からエントリをアトミックに削除する
 
 ### アトミック書き込み
 
-`saveRecords` / `saveActorEntries` は以下の手順で書き込む。書き込み中の Kill によるファイル破損を防ぐ。
+`_save_file_list`（`file_list.txt`）は以下の手順で書き込む。書き込み中の Kill によるファイル破損を防ぐ。
 
 1. 同一ディレクトリ内に一時ファイルを作成して書き込む
 2. `shutil.move` で宛先ファイルに上書き（同一 FS 内なので atomic rename）
-
-### JSON 破損フォールバック
-
-`loadActorEntries` は `JSONDecodeError` を捕捉して空リストを返す。破損した場合は当該アクターの JSON を再構築できる。
 
 ### サブプロセスによる OOM Kill 分離
 
@@ -83,7 +93,7 @@ Raspberry Pi (QEMU x86_64 エミュレーション) は OOM Kill でプロセス
 サブプロセス内では以下のメモリ削減対策を実施している:
 
 - **TF スレッド数の制限**: `TF_NUM_INTRAOP_THREADS=1` / `TF_NUM_INTEROP_THREADS=1` / `OMP_NUM_THREADS=1` を DeepFace インポート前に設定し、TF のスレッドプール用メモリを削減する。
-- **画像リサイズ**: PIL で長辺 640px 以内にリサイズしてから numpy 配列で DeepFace に渡す。6000x4000px 等の大きな画像のメモリ使用量を約 1/90 に削減する。
+- **画像リサイズ**: PIL で長辺 1920px 以内にリサイズしてから numpy 配列で DeepFace に渡す。6000x4000px 等の大きな画像のメモリ使用量を約 1/10 に削減する。
 
 ### 自動再起動ループ（analyze.sh）
 
@@ -91,9 +101,9 @@ Raspberry Pi (QEMU x86_64 エミュレーション) は OOM Kill でプロセス
 bash analyze.sh
 ```
 
-`inbox` にファイルが残っている限り `python -m src.analysis.main` を再起動し続ける。正常終了（exit 0）または inbox が空になった時点でループを終了する。
+`file_list.txt` の行数が 0 になるまで `python -m src.analysis.main` を再起動し続ける。正常終了（exit 0）または `file_list.txt` が空になった時点でループを終了する。
 
 ## 画像配信のセキュリティ
 
 - `LocalAnalysisRepository.readImageFile()` にてパストラバーサル対策を実施。
-- 解決したパスが `imagesRoot` 配下であることを検証してから読み込む。
+- 解決したパスが `imagesRoot`（`{PROJECT_ROOT}/data/images/`）配下であることを検証してから読み込む（Pi 側）。

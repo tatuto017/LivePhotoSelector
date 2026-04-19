@@ -1,5 +1,6 @@
 import path from "path";
 import { NextRequest, NextResponse } from "next/server";
+import { createPool, createDb } from "@/lib/db";
 import { LocalAnalysisRepository } from "@/lib/repositories/LocalAnalysisRepository";
 import { SelectionState } from "@/lib/types";
 
@@ -21,10 +22,11 @@ export async function PATCH(
   const body: PatchBody = await request.json();
   const { shootingDate, selectionState } = body;
 
-  const oneDriveRoot = process.env.ONE_DRIVE_ROOT ?? "";
+  const pool = createPool();
+  const db = createDb(pool);
   const repo = new LocalAnalysisRepository(
-    path.join(oneDriveRoot, "data"),
-    path.join(oneDriveRoot, "images")
+    db,
+    path.join(process.env.PROJECT_ROOT ?? "", "data", "images")
   );
 
   await repo.saveSelectionState(

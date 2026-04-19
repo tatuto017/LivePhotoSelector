@@ -9,6 +9,13 @@ vi.mock("@/lib/repositories/ResultRepository", () => ({
   ResultRepository: vi.fn(() => ({ save: vi.fn() })),
 }));
 
+// PhotoRepository をモック化
+vi.mock("@/lib/repositories/PhotoRepository", () => ({
+  PhotoRepository: vi.fn(() => ({
+    fetchPending: vi.fn().mockResolvedValue({ photos: [], hasMore: false }),
+  })),
+}));
+
 // usePhotoSelection をモック化
 vi.mock("@/hooks/usePhotoSelection");
 import { usePhotoSelection } from "@/hooks/usePhotoSelection";
@@ -100,6 +107,33 @@ describe("PhotoSelectionClient", () => {
     expect(screen.getByText("選別完了")).toBeInTheDocument();
   });
 
+  // ─── 先読みカードの不可視化 ──────────────────────────────────
+  it("先頭カード（idx=0）は opacity:1 で表示される", () => {
+    // Arrange
+    const photos = makePhotos(3);
+    mockPhotoSelection(photos);
+
+    // Act
+    render(<PhotoSelectionClient actor="actor_a" initialPhotos={photos} />);
+
+    // Assert
+    const firstCard = screen.getByTestId("photo-img000.jpg").closest("[style]");
+    expect(firstCard).toHaveStyle({ opacity: "1" });
+  });
+
+  it("2枚目以降のカード（idx>0）は opacity:0 で不可視になる", () => {
+    // Arrange
+    const photos = makePhotos(3);
+    mockPhotoSelection(photos);
+
+    // Act
+    render(<PhotoSelectionClient actor="actor_a" initialPhotos={photos} />);
+
+    // Assert
+    const secondCard = screen.getByTestId("photo-img001.jpg").closest("[style]");
+    expect(secondCard).toHaveStyle({ opacity: "0" });
+  });
+
   // ─── エラーバナー ────────────────────────────────────────────
   it("error がある場合はエラーバナーを表示する", () => {
     // Arrange
@@ -158,6 +192,7 @@ describe("PhotoSelectionClient", () => {
       "actor_a",
       photos,
       expect.any(Object), // ResultRepository インスタンス
+      expect.any(Object), // PhotoRepository インスタンス
       0
     );
   });
