@@ -31,6 +31,12 @@
 │   │       ├── __init__.py
 │   │       ├── conftest.py    # torch・clip モック
 │   │       └── test_main.py
+│   ├── move/                  # Python移動スクリプト (SQLAlchemy)
+│   │   ├── __init__.py
+│   │   ├── main.py
+│   │   └── tests/             # Pytestテスト
+│   │       ├── __init__.py
+│   │       └── test_main.py
 │   └── mocks/                 # Vitest 用 MSW モックサーバー
 │       ├── handlers.ts
 │       └── server.ts

@@ -12,6 +12,7 @@
 | スコアリングスクリプト | Python 3.13, Scikit-learn, pandas, SQLAlchemy, python-dotenv, tqdm |
 | データ整理スクリプト | Python 3.13, SQLAlchemy, python-dotenv |
 | 振り分けスクリプト | Python 3.13, PyTorch, CLIP (OpenAI), Pillow, tqdm |
+| 移動スクリプト | Python 3.13, SQLAlchemy, python-dotenv |
 | データベース | MariaDB（Raspberry Pi 上で稼働） |
 | ホスティング | Raspberry Pi 4 + Cloudflare Tunnel |
 | ストレージ | Mac の `DATA_ROOT` ディレクトリを Pi の `data/` にマウント |
@@ -27,22 +28,26 @@
    # 学習後、配置した写真は自動的に削除され member_features.pt が更新される
    python -m src.sorting.main --learn
 
-3. 写真を {DATA_ROOT}/inbox/{actor}/ に配置する
+3. 振り分け済み写真を解析作業ディレクトリへ移動
+   python -m src.move.main
+   ※ sorting_state に同名エントリ（learned=false）が存在する場合はリネームして移動
 
-4. Mac で解析（inbox → images へ移動 + MariaDB に登録）
+4. 写真を {DATA_ROOT}/inbox/{actor}/ に配置する
+
+5. Mac で解析（inbox → images へ移動 + MariaDB に登録）
    bash analyze.sh
    ※ OOM Kill 時は自動再起動。file_list.txt が空になるまでループする
    ※ 1 枚処理するたびに file_list.txt からエントリを削除（再起動後の続きから再開対応）
    ※ MariaDB に INSERT されるため Pi 側から即時参照可能
 
-5. iPhone で Pi にアクセスして OK/NG 選択
+6. iPhone で Pi にアクセスして OK/NG 選択
    右スワイプ = OK  /  左スワイプ = NG
    選択結果は MariaDB の sorting_state テーブルに即時書き込まれる
 
-6. スコアリング（演者ごとの傾向を学習・スコア更新）
+7. スコアリング（演者ごとの傾向を学習・スコア更新）
    python -m src.scoring.main
 
-7. 写真整理（OK → confirmed/ へ移動、NG → 削除）
+8. 写真整理（OK → confirmed/ へ移動、NG → 削除）
    python -m src.finalize.main
 ```
 
@@ -145,6 +150,12 @@ python -m src.sorting.main --workers 8
 
 # 学習（master_photos/ の写真から特徴量を更新）
 python -m src.sorting.main --learn
+
+# 移動（振り分け済み写真を ANALYZE_ROOT へ移動、デフォルト 4 並列）
+python -m src.move.main
+
+# 移動（並列数を指定）
+python -m src.move.main --workers 8
 ```
 
 ## テスト
@@ -164,6 +175,9 @@ npm test
 
 # 振り分けスクリプト（カバレッジ 100% 目標）
 .venv_docker/bin/python -m pytest src/sorting/tests/
+
+# 移動スクリプト（カバレッジ 100% 目標）
+.venv_docker/bin/python -m pytest src/move/tests/
 ```
 
 ## Raspberry Pi へのデプロイ
@@ -210,6 +224,9 @@ rsync -avz --delete \
 │   │   ├── main.py
 │   │   └── tests/
 │   ├── sorting/               # Python 振り分けスクリプト (CLIP/PyTorch)
+│   │   ├── main.py
+│   │   └── tests/
+│   ├── move/                  # Python 移動スクリプト (SQLAlchemy)
 │   │   ├── main.py
 │   │   └── tests/
 │   └── mocks/                 # Vitest 用 MSW モックサーバー
@@ -299,4 +316,5 @@ MariaDB（Raspberry Pi 上で稼働）:
 | [docs/spec-scoring.md](docs/spec-scoring.md) | Scikit-learn スコアリング仕様 |
 | [docs/spec-finalize.md](docs/spec-finalize.md) | データ整理仕様 |
 | [docs/spec-sorting.md](docs/spec-sorting.md) | 振り分け仕様 |
+| [docs/spec-move.md](docs/spec-move.md) | 移動仕様 |
 | [docs/DESIGN.md](docs/DESIGN.md) | UI デザイン仕様 |

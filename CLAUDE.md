@@ -21,6 +21,7 @@ iPhone から高速に選別するための Web アプリ。
 | 解析スクリプト | Python 3.13, DeepFace, OpenCV (opencv-python-headless), Pillow, tf-keras, SQLAlchemy, python-dotenv, tqdm |
 | スコアリングスクリプト | Python 3.13, Scikit-learn, pandas, SQLAlchemy, python-dotenv, tqdm |
 | 振り分けスクリプト | Python 3.13, PyTorch, CLIP (OpenAI), Pillow, tqdm |
+| 移動スクリプト | Python 3.13, SQLAlchemy, python-dotenv |
 | データベース | MariaDB（Raspberry Pi 上で稼働） |
 | ホスティング | Raspberry Pi 4 + Cloudflare Tunnel |
 
@@ -66,6 +67,7 @@ Next.js（Pi）と Python 解析スクリプト（Mac）で同じ変数名を共
 - **Scoring**: `.venv_docker/bin/python -m pytest src/scoring/tests/`（Docker 環境では `--cov` 不要。カバレッジ 100% 目標）
 - **Finalize**: `.venv_docker/bin/python -m pytest src/finalize/tests/`（Docker 環境では `--cov` 不要。カバレッジ 100% 目標）
 - **Sorting**: `.venv_docker/bin/python -m pytest src/sorting/tests/`（Docker 環境では `--cov` 不要。カバレッジ 100% 目標）
+- **Move**: `.venv_docker/bin/python -m pytest src/move/tests/`（Docker 環境では `--cov` 不要。カバレッジ 100% 目標）
 
 > テストは結果が確認出来るコマンド(ログ出力等)を提示し、手動実施を促し終了後に結果を確認すること。
 
@@ -127,7 +129,7 @@ Next.js（Pi）と Python 解析スクリプト（Mac）で同じ変数名を共
 
 ---
 
-<important if="Python解析スクリプト（src/analysis/, src/scoring/, src/finalize/）を編集するとき">
+<important if="Python解析スクリプト（src/analysis/, src/scoring/, src/finalize/, src/move/）を編集するとき">
 - 仮想環境: `.venv_docker` を使用（Docker環境）
 - モック: DeepFace・PIL・ファイル操作（shutil等）は必ずモック化
 - DBモック: `_create_engine` をパッチし、`engine.connect().__enter__` で `mock_conn` を返す。行データは `types.SimpleNamespace` で attribute アクセスを模倣する
