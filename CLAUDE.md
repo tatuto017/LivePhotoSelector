@@ -129,7 +129,7 @@ Next.js（Pi）と Python 解析スクリプト（Mac）で同じ変数名を共
 
 ---
 
-<important if="Python解析スクリプト（src/analysis/, src/scoring/, src/finalize/, src/move/）を編集するとき">
+<important if="Python解析スクリプト（src/analysis/, src/scoring/, src/finalize/, src/sorting/, src/move/）を編集するとき">
 - 仮想環境: `.venv_docker` を使用（Docker環境）
 - モック: DeepFace・PIL・ファイル操作（shutil等）は必ずモック化
 - DBモック: `_create_engine` をパッチし、`engine.connect().__enter__` で `mock_conn` を返す。行データは `types.SimpleNamespace` で attribute アクセスを模倣する

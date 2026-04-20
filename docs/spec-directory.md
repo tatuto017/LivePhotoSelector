@@ -6,12 +6,15 @@
 ```text
 {PROJECT_ROOT}/
 ├── src/
+│   ├── db_schema.py           # SQLAlchemy テーブル定義（Python共通）
 │   ├── analysis/              # Python解析スクリプト (DeepFace)
 │   │   ├── __init__.py
 │   │   ├── main.py
+│   │   ├── analyzer_subprocess.py  # DeepFace解析サブプロセス（OOM Kill分離）
 │   │   └── tests/             # Pytestテスト
 │   │       ├── __init__.py
-│   │       └── test_main.py
+│   │       ├── test_main.py
+│   │       └── test_analyzer_subprocess.py
 │   ├── scoring/               # Pythonスコアリングスクリプト (Scikit-learn)
 │   │   ├── __init__.py
 │   │   ├── main.py
@@ -41,7 +44,8 @@
 │       ├── handlers.ts
 │       └── server.ts
 ├── migrations/                # DBマイグレーションSQL
-│   └── 001_create_analysis_records.sql
+│   ├── 001_create_analysis_records.sql
+│   └── 002_create_sorting_state.sql
 ├── app/                       # Next.js App Router
 │   ├── page.tsx               # 被写体一覧（Server Component）
 │   ├── actors/[actor]/
@@ -62,6 +66,7 @@
 ├── lib/
 │   ├── types.ts               # 共通型定義
 │   ├── db.ts                  # MariaDB 接続プール生成
+│   ├── schema.ts              # Drizzle テーブル定義
 │   └── repositories/
 │       ├── LocalAnalysisRepository.ts  # MariaDB 読み書き + 画像配信リポジトリ（サーバーサイド）
 │       ├── PhotoRepository.ts          # pending 写真取得リポジトリ（クライアントサイド HTTP）
