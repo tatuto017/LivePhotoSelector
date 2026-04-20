@@ -26,6 +26,7 @@
 - **外部アクセス**: Cloudflare Tunnel を使用して iPhone（外出先）から Raspberry Pi に安全にアクセスする。
 - **選別基準**: 演者の主観を最優先とする。スコアリングはソート・フィルタリングの補助指標として利用する。
 - **撮影日管理**: 選別結果に撮影日（`shootingDate`）を含める。EXIF から取得し `YYYY-MM-DD` 形式で保存する。同名ファイルでも撮影日が異なる場合は別エントリとして管理する。
+- **振り分け**: 被写体別に写真を振り分ける。
 
 ## UI/UX
 
@@ -49,6 +50,7 @@ Next.js（Pi）と Python 解析スクリプト（Mac）で環境依存の部分
 | `PROJECT_ROOT` | プロジェクトのベースディレクトリ（Pi 側で使用） |
 | `DATA_ROOT` | データディレクトリの絶対パス（Mac 側で使用。`PROJECT_ROOT` 外に配置可能） |
 | `ANALYZE_ROOT` | 解析作業ディレクトリの絶対パス（Mac 側で使用。`PROJECT_ROOT` 外に配置可能。解析完了後に `DATA_ROOT` へ手動で一括移動） |
+| `SORTING_ROOT` | 振り分けディレクトリの絶対パス（Mac 側で使用。`PROJECT_ROOT` 外に配置可能） |
 | `MYSQL_HOST` | MySQL ホスト名 |
 | `MYSQL_PORT` | MySQL ポート番号 |
 | `MYSQL_USER` | MySQL ユーザー名 |

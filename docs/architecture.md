@@ -35,18 +35,19 @@ Mac 側は環境変数 `DATA_ROOT` で任意のパスを指定でき、`PROJECT_
 | ファイル | 配置 | 用途 |
 | --- | --- | --- |
 | `{actor}_model.joblib` | `{DATA_ROOT}/` | 学習済みモデル（Mac でのみ使用） |
-| `inbox/file_list.txt` | `{DATA_ROOT}/inbox/` | 解析対象ファイル一覧（`{actor}/{filename}` 形式） |
-
-> `analysis.pki` は廃止。解析結果は MariaDB の `analysis_records` テーブルに永続化する。
 
 ### 解析結果の DB 登録フロー
 
 Pi（選択 UI）は MariaDB の `sorting_state` テーブルを直接読み書きする。解析スクリプト側は以下の手順でデータを登録する。
 
-1. **写真移動**: `data/inbox → data/images` へ写真を移動する。
-2. **analysis_records INSERT（移動後）**: 解析レコードを `analysis_records` テーブルに INSERT する。同一 `(actor, filename)` が既に存在する場合はスキップする（INSERT IGNORE）。
-3. **sorting_state INSERT（移動後）**: 解析結果を `sorting_state` テーブルに INSERT する。同一 `(actor_id, filename, shootingDate)` のレコードが既に存在する場合はスキップする（プロセス再起動後の継続対応）。
-4. **file_list.txt 更新（DB 登録後）**: 処理済みエントリを `file_list.txt` からアトミックに削除する。
+1. **ファイル列挙**: `ANALYZE_ROOT/{actor}/` をファイルシステムから直接走査して解析対象を収集する。
+2. **処理済みスキップ**: 起動時に `sorting_state` テーブルの `(actor_id, filename)` を取得し、既処理ファイルを除外する（OOM Kill 後の再起動対応）。
+3. **並列解析**: 未処理ファイルを `ThreadPoolExecutor`（デフォルト 4 ワーカー）で並列に DeepFace 解析する。
+4. **analysis_records INSERT**: 解析成功時のみレコードを INSERT する。同一 `(actor, filename)` が既に存在する場合はスキップする（INSERT IGNORE）。
+5. **sorting_state INSERT**: 解析成功・失敗を問わず全ファイルのエントリを INSERT する。同一 `(actor_id, filename)` が既に存在する場合はスキップする（INSERT IGNORE）。
+6. **ファイル移動なし**: 写真は解析後も `ANALYZE_ROOT` に留める。全解析完了後に手動で `DATA_ROOT/images/` へ移動する。
+
+> `file_list.txt` は廃止。処理済み判定は `sorting_state` テーブルへの問い合わせで行う。
 
 ## OpenCV ヘッドレスモード
 
@@ -70,17 +71,11 @@ Raspberry Pi (QEMU x86_64 エミュレーション) は OOM Kill でプロセス
 
 1 枚解析するたびに以下を順番に実行し、OOM Kill 後に再起動しても続きから再開できる。
 
-1. `data/inbox → data/images` へ写真を移動する
+1. DeepFace 解析（サブプロセス）
 2. `analysis_records` テーブルに INSERT する（重複は INSERT IGNORE でスキップ）
 3. `sorting_state` テーブルに INSERT する（重複は INSERT IGNORE でスキップ）
-4. `file_list.txt` からエントリをアトミックに削除する
 
-### アトミック書き込み
-
-`_save_file_list`（`file_list.txt`）は以下の手順で書き込む。書き込み中の Kill によるファイル破損を防ぐ。
-
-1. 同一ディレクトリ内に一時ファイルを作成して書き込む
-2. `shutil.move` で宛先ファイルに上書き（同一 FS 内なので atomic rename）
+再起動時は `sorting_state` テーブルの既処理キーを取得して未処理ファイルに絞り込むため、`file_list.txt` によるアトミック削除は不要。
 
 ### サブプロセスによる OOM Kill 分離
 
@@ -101,9 +96,37 @@ Raspberry Pi (QEMU x86_64 エミュレーション) は OOM Kill でプロセス
 bash analyze.sh
 ```
 
-`file_list.txt` の行数が 0 になるまで `python -m src.analysis.main` を再起動し続ける。正常終了（exit 0）または `file_list.txt` が空になった時点でループを終了する。
+`sorting_state` テーブルの未処理ファイル数が 0 になるまで `python -m src.analysis.main` を再起動し続ける。正常終了（exit 0）または未処理ファイルがなくなった時点でループを終了する。
 
 ## 画像配信のセキュリティ
 
 - `LocalAnalysisRepository.readImageFile()` にてパストラバーサル対策を実施。
 - 解決したパスが `imagesRoot`（`{PROJECT_ROOT}/data/images/`）配下であることを検証してから読み込む（Pi 側）。
+
+## 振り分けスクリプトのアーキテクチャ
+
+### モード分岐（`--learn` フラグ）
+
+振り分けスクリプトは `--learn` の有無で 2 つのモードを持つ。
+
+| モード | コマンド | 処理 |
+| --- | --- | --- |
+| 振り分けのみ（デフォルト） | `python -m src.sorting.main` | `run()` → `Classifier.classify()` |
+| 学習のみ | `python -m src.sorting.main --learn` | `learn()` → `Learner.learn()` |
+
+同一実行で学習と振り分けを同時に行う設計は採用しない。学習後に特徴量が更新されるため、振り分けは別途実行する。
+
+### CLIPによる特徴量データベース設計
+
+- モデル: `ViT-L/14`（OpenAI CLIP）。float32 に統一して MPS / CPU で動作する。
+- 学習: `master_photos/{actor}/` の画像から特徴量ベクトルを抽出し、`member_features.pt`（`actor名 → Tensor` の辞書）に追記保存する。学習済み画像は処理後に削除する。
+- 振り分け: 各 actor の特徴量の平均ベクトルとのコサイン類似度（内積）で最近傍 actor を判定し、`sorted_results/{actor}/` へ移動する。
+- 抽出エラーが発生した画像はスキップし（ファイルは削除しない）、次の画像の処理を続行する。
+
+### 依存性の注入（DI）
+
+`run()` / `learn()` の引数に `FeatureRepository`・`FeatureExtractor`・`Classifier` / `Learner` を注入できる。省略した場合は関数内でデフォルトインスタンスを生成する。モデルのロード（`clip.load()`）はコストが高いため、テストではすべてモック化する。
+
+### 振り分けモジュールのテスト戦略
+
+`torch` / `clip` は `.venv_docker` にインストールされていないため、`conftest.py` で `sys.modules` に直接スタブを登録してから `main.py` をインポートする。これにより `torch.load` / `torch.save` / `clip.load` を `MagicMock` で制御し、実際のモデルなしでロジックのみをテストできる。

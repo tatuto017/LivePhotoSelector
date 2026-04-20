@@ -20,6 +20,7 @@ iPhone から高速に選別するための Web アプリ。
 | バックエンド | Next.js API Routes, Drizzle ORM（MariaDB） |
 | 解析スクリプト | Python 3.13, DeepFace, OpenCV (opencv-python-headless), Pillow, tf-keras, SQLAlchemy, python-dotenv, tqdm |
 | スコアリングスクリプト | Python 3.13, Scikit-learn, pandas, SQLAlchemy, python-dotenv, tqdm |
+| 振り分けスクリプト | Python 3.13, PyTorch, CLIP (OpenAI), Pillow, tqdm |
 | データベース | MariaDB（Raspberry Pi 上で稼働） |
 | ホスティング | Raspberry Pi 4 + Cloudflare Tunnel |
 
@@ -49,6 +50,7 @@ Next.js（Pi）と Python 解析スクリプト（Mac）で同じ変数名を共
 | `PROJECT_ROOT` | プロジェクトのベースディレクトリ（Pi 側で使用） |
 | `DATA_ROOT` | データディレクトリの絶対パス（Mac 側で使用。`PROJECT_ROOT` 外に配置可能） |
 | `ANALYZE_ROOT` | 解析作業ディレクトリの絶対パス（Mac 側で使用。解析完了後に `DATA_ROOT` へ一括移動） |
+| `SORTING_ROOT` | 振り分けディレクトリの絶対パス（Mac 側で使用。`PROJECT_ROOT` 外に配置可能） |
 | `MYSQL_HOST` | MariaDB ホスト名 |
 | `MYSQL_PORT` | MariaDB ポート番号 |
 | `MYSQL_USER` | MariaDB ユーザー名 |
@@ -63,6 +65,7 @@ Next.js（Pi）と Python 解析スクリプト（Mac）で同じ変数名を共
 - **Analysis**: `.venv_docker/bin/python -m pytest src/analysis/tests/`（Docker 環境では `--cov` 不要。カバレッジ 100% 目標）
 - **Scoring**: `.venv_docker/bin/python -m pytest src/scoring/tests/`（Docker 環境では `--cov` 不要。カバレッジ 100% 目標）
 - **Finalize**: `.venv_docker/bin/python -m pytest src/finalize/tests/`（Docker 環境では `--cov` 不要。カバレッジ 100% 目標）
+- **Sorting**: `.venv_docker/bin/python -m pytest src/sorting/tests/`（Docker 環境では `--cov` 不要。カバレッジ 100% 目標）
 
 > テストは結果が確認出来るコマンド(ログ出力等)を提示し、手動実施を促し終了後に結果を確認すること。
 
