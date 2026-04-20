@@ -24,6 +24,13 @@
 │   │   └── tests/             # Pytestテスト
 │   │       ├── __init__.py
 │   │       └── test_main.py
+│   ├── sorting/               # Python振り分けスクリプト (CLIP/PyTorch)
+│   │   ├── __init__.py
+│   │   ├── main.py
+│   │   └── tests/             # Pytestテスト
+│   │       ├── __init__.py
+│   │       ├── conftest.py    # torch・clip モック
+│   │       └── test_main.py
 │   └── mocks/                 # Vitest 用 MSW モックサーバー
 │       ├── handlers.ts
 │       └── server.ts
@@ -73,6 +80,19 @@
 │   └── actor_b/
 └── confirmed/                 # OK確定写真
     └── actor_a/
+```
+
+### 振り分け用ディレクトリ（`SORTING_ROOT` で指定、`PROJECT_ROOT` 外に配置可能）
+```text
+{SORTING_ROOT}/                # 環境変数 SORTING_ROOT で指定した任意のパス
+├── member_features.pt         # 学習済みモデル
+├── all_photos/                # 振り分け対象写真のディレクトリ
+├── master_photos/             # 学習用写真ディレクトリ
+│   ├── actor_a/
+│   └── actor_b/
+└── sorted_results/            # 振り分け結果ディレクトリ
+    ├── actor_a/
+    └── actor_b/
 ```
 
 ## Raspberry Pi

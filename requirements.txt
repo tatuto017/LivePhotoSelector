@@ -7,6 +7,11 @@ Pillow==11.2.1
 scikit-learn==1.6.1
 pandas==2.2.3
 
+# 振り分けスクリプト (CLIP/PyTorch) - Mac のみ
+torch>=2.0.0
+torchvision>=0.15.0
+openai-clip
+
 # 共通
 python-dotenv==1.1.0
 tqdm==4.67.3

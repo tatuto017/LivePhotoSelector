@@ -11,6 +11,7 @@
 | 解析スクリプト | Python 3.13, DeepFace, Facenet, opencv-python-headless, Pillow, tf-keras, SQLAlchemy, python-dotenv, tqdm |
 | スコアリングスクリプト | Python 3.13, Scikit-learn, pandas, SQLAlchemy, python-dotenv, tqdm |
 | データ整理スクリプト | Python 3.13, SQLAlchemy, python-dotenv |
+| 振り分けスクリプト | Python 3.13, PyTorch, CLIP (OpenAI), Pillow, tqdm |
 | データベース | MariaDB（Raspberry Pi 上で稼働） |
 | ホスティング | Raspberry Pi 4 + Cloudflare Tunnel |
 | ストレージ | Mac の `DATA_ROOT` ディレクトリを Pi の `data/` にマウント |
@@ -18,22 +19,30 @@
 ## 操作ワークフロー
 
 ```text
-1. 写真を {DATA_ROOT}/inbox/{actor}/ に配置する
+1. 振り分け（CLIP の学習済み特徴量を使って全体写真を被写体別に振り分け）
+   python -m src.sorting.main
 
-2. Mac で解析（inbox → images へ移動 + MariaDB に登録）
+2. 振り分けミスした写真を学習させる
+   # 事前に SORTING_ROOT/master_photos/{actor}/ に学習させる写真を配置する
+   # 学習後、配置した写真は自動的に削除され member_features.pt が更新される
+   python -m src.sorting.main --learn
+
+3. 写真を {DATA_ROOT}/inbox/{actor}/ に配置する
+
+4. Mac で解析（inbox → images へ移動 + MariaDB に登録）
    bash analyze.sh
    ※ OOM Kill 時は自動再起動。file_list.txt が空になるまでループする
    ※ 1 枚処理するたびに file_list.txt からエントリを削除（再起動後の続きから再開対応）
    ※ MariaDB に INSERT されるため Pi 側から即時参照可能
 
-3. iPhone で Pi にアクセスして OK/NG 選択
+5. iPhone で Pi にアクセスして OK/NG 選択
    右スワイプ = OK  /  左スワイプ = NG
    選択結果は MariaDB の sorting_state テーブルに即時書き込まれる
 
-4. スコアリング（演者ごとの傾向を学習・スコア更新）
+6. スコアリング（演者ごとの傾向を学習・スコア更新）
    python -m src.scoring.main
 
-5. 写真整理（OK → confirmed/ へ移動、NG → 削除）
+7. 写真整理（OK → confirmed/ へ移動、NG → 削除）
    python -m src.finalize.main
 ```
 
@@ -86,6 +95,7 @@ Next.js（Pi）と Python スクリプト（Mac）で同じ変数名を共有す
 | `PROJECT_ROOT` | プロジェクトのベースディレクトリ（Pi 側で使用） |
 | `DATA_ROOT` | データディレクトリの絶対パス（Mac 側で使用。`PROJECT_ROOT` 外に配置可能） |
 | `ANALYZE_ROOT` | 解析作業ディレクトリの絶対パス（Mac 側で使用。解析前の写真置き場） |
+| `SORTING_ROOT` | 振り分けディレクトリの絶対パス（Mac 側で使用。`PROJECT_ROOT` 外に配置可能） |
 | `MYSQL_HOST` | MariaDB ホスト名 |
 | `MYSQL_PORT` | MariaDB ポート番号 |
 | `MYSQL_USER` | MariaDB ユーザー名 |
@@ -96,6 +106,7 @@ Next.js（Pi）と Python スクリプト（Mac）で同じ変数名を共有す
 PROJECT_ROOT=/path/to/LivePhotoSelector
 DATA_ROOT=/path/to/data
 ANALYZE_ROOT=/path/to/analyze
+SORTING_ROOT=/path/to/sorting
 MYSQL_HOST=localhost
 MYSQL_PORT=3306
 MYSQL_USER=livephoto
@@ -125,6 +136,15 @@ python -m src.scoring.main
 
 # 写真整理（OK → confirmed/、NG → 削除）
 python -m src.finalize.main
+
+# 振り分け（被写体別振り分け、デフォルト 4 並列）
+python -m src.sorting.main
+
+# 振り分け（並列数を指定）
+python -m src.sorting.main --workers 8
+
+# 学習（master_photos/ の写真から特徴量を更新）
+python -m src.sorting.main --learn
 ```
 
 ## テスト
@@ -141,6 +161,9 @@ npm test
 
 # データ整理スクリプト（カバレッジ 100% 目標）
 .venv_docker/bin/python -m pytest src/finalize/tests/
+
+# 振り分けスクリプト（カバレッジ 100% 目標）
+.venv_docker/bin/python -m pytest src/sorting/tests/
 ```
 
 ## Raspberry Pi へのデプロイ
@@ -184,6 +207,9 @@ rsync -avz --delete \
 │   │   ├── main.py
 │   │   └── tests/
 │   ├── finalize/              # Python データ整理スクリプト
+│   │   ├── main.py
+│   │   └── tests/
+│   ├── sorting/               # Python 振り分けスクリプト (CLIP/PyTorch)
 │   │   ├── main.py
 │   │   └── tests/
 │   └── mocks/                 # Vitest 用 MSW モックサーバー
@@ -230,6 +256,20 @@ rsync -avz --delete \
 └── actor_b/
 ```
 
+振り分け用ディレクトリ（`SORTING_ROOT` で指定、`PROJECT_ROOT` 外に配置可能）:
+
+```text
+{SORTING_ROOT}/
+├── member_features.pt         # 学習済みモデル
+├── all_photos/                # 振り分け対象写真
+├── master_photos/             # 学習用写真
+│   ├── actor_a/
+│   └── actor_b/
+└── sorted_results/            # 振り分け結果
+    ├── actor_a/
+    └── actor_b/
+```
+
 データディレクトリ（`DATA_ROOT` で指定、`PROJECT_ROOT` 外に配置可能）:
 
 ```text
@@ -258,4 +298,5 @@ MariaDB（Raspberry Pi 上で稼働）:
 | [docs/spec-analysis.md](docs/spec-analysis.md) | DeepFace 解析仕様 |
 | [docs/spec-scoring.md](docs/spec-scoring.md) | Scikit-learn スコアリング仕様 |
 | [docs/spec-finalize.md](docs/spec-finalize.md) | データ整理仕様 |
+| [docs/spec-sorting.md](docs/spec-sorting.md) | 振り分け仕様 |
 | [docs/DESIGN.md](docs/DESIGN.md) | UI デザイン仕様 |
