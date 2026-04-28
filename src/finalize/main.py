@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, delete, select, update
+from sqlalchemy import create_engine, select, update
 from sqlalchemy.engine import Engine
 
 from src.db_schema import sorting_state
@@ -115,23 +115,6 @@ class FinalizeRepository:
                 "selectedAt": str(row.selected_at) if row.selected_at is not None else None,
             })
         return result
-
-    def deleteEntry(self, actor: str, filename: str, shootingDate: str) -> None:
-        """sorting_state テーブルからエントリを削除する。
-
-        Args:
-            actor: 被写体 ID。
-            filename: ファイル名。
-            shootingDate: 撮影日 (YYYY-MM-DD)。
-        """
-        stmt = delete(sorting_state).where(
-            sorting_state.c.actor_id == actor,
-            sorting_state.c.filename == filename,
-            sorting_state.c.shooting_date == shootingDate,
-        )
-        with self._engine.connect() as conn:
-            conn.execute(stmt)
-            conn.commit()
 
     def updatePublic(self, actor: str) -> None:
         """sorting_state テーブルの指定 actor の全エントリで public を true に更新する。
@@ -273,7 +256,7 @@ def _run_finalize_for_actor(
 
     1. ok エントリ → images/ から confirmed/ へ移動
     2. ng エントリ → images/ から削除
-    3. 処理済みエントリを sorting_state テーブルから削除
+    sorting_state のレコードは削除しない。
 
     Args:
         actor: 被写体 ID。
@@ -292,9 +275,6 @@ def _run_finalize_for_actor(
             # ng: images/ から削除
             finalizer.deleteFromImages(actor, entry["filename"])
             print(f"[INFO] Deleted: {actor}/{entry['filename']}")
-
-        # 処理済みエントリを DB から削除
-        repository.deleteEntry(actor, entry["filename"], entry["shootingDate"])
 
 
 def main() -> None:

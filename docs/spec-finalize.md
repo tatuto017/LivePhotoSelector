@@ -14,6 +14,6 @@
    - これにより Web アプリ上で写真が表示対象になる。
 
 ### フェーズ2: 選択後の整理（選択完了後）
-
+`sorting_state` のレコードの削除はしないで、下記のファイル処理のみ行う。
 1. `sorting_state` テーブルの `selectionState` が `ok` の写真を `OK確定写真フォルダ` に移動する。
 2. `sorting_state` テーブルの `selectionState` が `ng` の写真を削除する。
