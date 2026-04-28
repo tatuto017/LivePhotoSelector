@@ -1,5 +1,9 @@
 {
-  "permissions" : {
+  "permissions": {
+    "allow": [
+      "Bash(sqlite3 /home/claude/.claude-mem/claude-mem.db *)",
+      "Bash(code-review-graph status)"
+    ],
     "deny": [
       "Read(**/.env)",
       "Read(**/.env.*)",
