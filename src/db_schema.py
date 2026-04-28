@@ -57,4 +57,5 @@ sorting_state = Table(
     Column("learned", Boolean, nullable=False, server_default=text("FALSE")),
     Column("selected_at", DateTime, nullable=True),
     Column("public", Boolean, nullable=False, server_default=text("FALSE")),
+    Column("finalize", Boolean, nullable=False, server_default=text("FALSE")),
 )

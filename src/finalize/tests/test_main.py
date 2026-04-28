@@ -155,6 +155,47 @@ class TestFinalizeRepository:
 
         mock_conn.execute.assert_called_once()
 
+    # --- loadFinalizedEntries (finalize=false フィルタ) ---
+
+    def test_load_finalized_entries_filters_by_finalize_false(self) -> None:
+        """finalize=false のエントリのみ取得するクエリが実行されること。"""
+        repo, mock_engine = self._make_repo_with_engine()
+        mock_conn = self._setup_conn(mock_engine, rows=[])
+
+        repo.loadFinalizedEntries("actor_a")
+
+        mock_conn.execute.assert_called_once()
+
+    # --- updateFinalize ---
+
+    def test_update_finalize_executes_update_sql(self) -> None:
+        """UPDATE sorting_state SET finalize = TRUE の SQL が実行されること。"""
+        repo, mock_engine = self._make_repo_with_engine()
+        mock_conn = self._setup_conn(mock_engine)
+
+        repo.updateFinalize("actor_a", "img.jpg", "2026-04-01")
+
+        mock_conn.execute.assert_called_once()
+        mock_conn.commit.assert_called_once()
+
+    def test_update_finalize_commits_after_execute(self) -> None:
+        """execute 後に commit が呼ばれること。"""
+        repo, mock_engine = self._make_repo_with_engine()
+        mock_conn = self._setup_conn(mock_engine)
+
+        repo.updateFinalize("actor_a", "img.jpg", "2026-04-01")
+
+        mock_conn.commit.assert_called_once_with()
+
+    def test_update_finalize_passes_correct_params(self) -> None:
+        """正しい actor_id / filename / shooting_date でクエリが実行されること。"""
+        repo, mock_engine = self._make_repo_with_engine()
+        mock_conn = self._setup_conn(mock_engine)
+
+        repo.updateFinalize("alice", "photo.jpg", "2026-05-01")
+
+        mock_conn.execute.assert_called_once()
+
 
 # ---------------------------------------------------------------------------
 # PhotoFinalizer
@@ -357,6 +398,53 @@ class TestRunFinalizeForActor:
         _run_finalize_for_actor("actor_b", repo, finalizer)
 
         repo.loadFinalizedEntries.assert_called_once_with("actor_b")
+
+    def test_update_finalize_called_after_ok_entry(self) -> None:
+        """ok エントリ処理後に updateFinalize が呼ばれること。"""
+        entries = [{
+            "filename": "img.jpg",
+            "shootingDate": "2026-04-01",
+            "score": 0.9,
+            "selectionState": "ok",
+            "selectedAt": "2026-04-06T12:00:00.000Z",
+        }]
+        repo = self._make_mock_repo(entries)
+        finalizer = MagicMock(spec=PhotoFinalizer)
+
+        _run_finalize_for_actor("actor_a", repo, finalizer)
+
+        repo.updateFinalize.assert_called_once_with("actor_a", "img.jpg", "2026-04-01")
+
+    def test_update_finalize_called_after_ng_entry(self) -> None:
+        """ng エントリ処理後に updateFinalize が呼ばれること。"""
+        entries = [{
+            "filename": "img.jpg",
+            "shootingDate": "2026-04-01",
+            "score": 0.1,
+            "selectionState": "ng",
+            "selectedAt": "2026-04-06T12:00:00.000Z",
+        }]
+        repo = self._make_mock_repo(entries)
+        finalizer = MagicMock(spec=PhotoFinalizer)
+
+        _run_finalize_for_actor("actor_a", repo, finalizer)
+
+        repo.updateFinalize.assert_called_once_with("actor_a", "img.jpg", "2026-04-01")
+
+    def test_update_finalize_called_for_each_entry(self) -> None:
+        """複数エントリそれぞれに updateFinalize が呼ばれること。"""
+        entries = [
+            {"filename": "ok.jpg", "shootingDate": "2026-04-01", "score": 0.9, "selectionState": "ok", "selectedAt": None},
+            {"filename": "ng.jpg", "shootingDate": "2026-04-01", "score": 0.1, "selectionState": "ng", "selectedAt": None},
+        ]
+        repo = self._make_mock_repo(entries)
+        finalizer = MagicMock(spec=PhotoFinalizer)
+
+        _run_finalize_for_actor("actor_a", repo, finalizer)
+
+        assert repo.updateFinalize.call_count == 2
+        repo.updateFinalize.assert_any_call("actor_a", "ok.jpg", "2026-04-01")
+        repo.updateFinalize.assert_any_call("actor_a", "ng.jpg", "2026-04-01")
 
 
 # ---------------------------------------------------------------------------
