@@ -741,8 +741,8 @@ class TestRunScoringForActor:
         mock_trainer.train.assert_not_called()
         mock_scorer.score.assert_not_called()
 
-    def test_skips_training_when_single_class_labels(self) -> None:
-        """labeled エントリが単一クラスのみの場合、学習がスキップされること。"""
+    def test_trains_with_single_class_labeled_entries(self) -> None:
+        """labeled エントリが単一クラスのみでも学習が実行されること。"""
         entries = [
             {
                 "filename": "img1.jpg",
@@ -773,8 +773,8 @@ class TestRunScoringForActor:
             record_map,
         )
 
-        mock_trainer.train.assert_not_called()
-        mock_scorer.score.assert_not_called()
+        mock_trainer.train.assert_called_once()
+        mock_scorer.score.assert_not_called()  # img2.jpg が record_map に存在しないためスコアリング対象なし
 
     def test_skips_training_when_no_matching_records_in_pki(self) -> None:
         """labeled エントリが analysis.pki に存在しない場合、学習がスキップされること。"""

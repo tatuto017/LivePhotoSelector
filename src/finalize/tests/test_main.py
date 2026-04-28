@@ -125,27 +125,6 @@ class TestFinalizeRepository:
 
         assert result == []
 
-    # --- deleteEntry ---
-
-    def test_delete_entry_executes_delete_sql(self) -> None:
-        """DELETE SQL が実行されること。"""
-        repo, mock_engine = self._make_repo_with_engine()
-        mock_conn = self._setup_conn(mock_engine)
-
-        repo.deleteEntry("actor_a", "img001.jpg", "2026-04-01")
-
-        mock_conn.execute.assert_called_once()
-        mock_conn.commit.assert_called_once()
-
-    def test_delete_entry_commits_after_execute(self) -> None:
-        """execute 後に commit が呼ばれること。"""
-        repo, mock_engine = self._make_repo_with_engine()
-        mock_conn = self._setup_conn(mock_engine)
-
-        repo.deleteEntry("actor_a", "img001.jpg", "2026-04-01")
-
-        mock_conn.commit.assert_called_once_with()
-
     # --- updatePublic ---
 
     def test_update_public_executes_update_sql(self) -> None:
@@ -344,51 +323,6 @@ class TestRunFinalizeForActor:
         finalizer.deleteFromImages.assert_called_once_with("actor_a", "img.jpg")
         finalizer.moveToConfirmed.assert_not_called()
 
-    def test_delete_entry_called_for_ok(self) -> None:
-        """ok エントリの移動後に deleteEntry が呼ばれること。"""
-        entries = [
-            {
-                "filename": "ok.jpg",
-                "shootingDate": "2026-04-01",
-                "score": 0.9,
-                "selectionState": "ok",
-                "selectedAt": None,
-            }
-        ]
-        repo = self._make_mock_repo(entries)
-        finalizer = MagicMock(spec=PhotoFinalizer)
-
-        _run_finalize_for_actor("actor_a", repo, finalizer)
-
-        repo.deleteEntry.assert_called_once_with("actor_a", "ok.jpg", "2026-04-01")
-
-    def test_delete_entry_called_for_ng(self) -> None:
-        """ng エントリの削除後に deleteEntry が呼ばれること。"""
-        entries = [
-            {
-                "filename": "ng.jpg",
-                "shootingDate": "2026-04-01",
-                "score": 0.1,
-                "selectionState": "ng",
-                "selectedAt": None,
-            }
-        ]
-        repo = self._make_mock_repo(entries)
-        finalizer = MagicMock(spec=PhotoFinalizer)
-
-        _run_finalize_for_actor("actor_a", repo, finalizer)
-
-        repo.deleteEntry.assert_called_once_with("actor_a", "ng.jpg", "2026-04-01")
-
-    def test_delete_entry_not_called_when_no_entries(self) -> None:
-        """エントリが無い場合、deleteEntry が呼ばれないこと。"""
-        repo = self._make_mock_repo([])
-        finalizer = MagicMock(spec=PhotoFinalizer)
-
-        _run_finalize_for_actor("actor_a", repo, finalizer)
-
-        repo.deleteEntry.assert_not_called()
-
     def test_processes_mixed_ok_and_ng_entries(self) -> None:
         """ok / ng エントリそれぞれが正しく処理されること。"""
         entries = [
@@ -414,9 +348,6 @@ class TestRunFinalizeForActor:
 
         finalizer.moveToConfirmed.assert_called_once_with("actor_a", "ok.jpg")
         finalizer.deleteFromImages.assert_called_once_with("actor_a", "ng.jpg")
-        assert repo.deleteEntry.call_count == 2
-        repo.deleteEntry.assert_any_call("actor_a", "ok.jpg", "2026-04-01")
-        repo.deleteEntry.assert_any_call("actor_a", "ng.jpg", "2026-04-01")
 
     def test_load_finalized_entries_called_with_actor(self) -> None:
         """loadFinalizedEntries が正しい actor 名で呼ばれること。"""

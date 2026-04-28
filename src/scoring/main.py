@@ -416,8 +416,7 @@ def _run_scoring_for_actor(
         train_features.append(_extract_features(record))
         train_labels.append(1 if entry["selectionState"] == "ok" else 0)
 
-    has_both_classes = len(set(train_labels)) >= 2
-    if train_features and has_both_classes:
+    if train_features:
         model = trainer.train(train_features, train_labels)
         repository.saveModel(actor, model)
         print(f"[INFO] Model saved for actor: {actor}")

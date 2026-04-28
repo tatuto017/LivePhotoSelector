@@ -11,14 +11,16 @@
 2. 被写体ごとに以下を実行する（`tqdm` で進捗表示）
    1. `sorting_state` から被写体の全エントリを取得し、以下に分割する
       - **labeled**: `selection_state` が `ok` または `ng`、かつ `learned = false`
-      - **pending**: `selection_state` が `pending`、かつ `learned = false`
+      - **pending**: `selection_state` が `pending`
    2. labeled エントリの `(actor, filename)` をキーに `analysis_records` から対応レコードを取得して特徴量に変換する
-   3. ok・ng の**両クラスが揃っている場合のみ**学習を実行する
+   3. **labeled エントリがある場合のみ**学習を実行する
       - ランダムフォレスト + GridSearchCV でハイパーパラメータチューニング
       - 学習済みモデルを `DATA_ROOT/{actor}_model.joblib` に保存する
       - labeled エントリの `learned` を `true` に更新する
+      - labeled エントリの更新内容を `sorting_state` に反映する。
       - 学習結果（サンプル数・訓練精度）を標準出力に表示する
-   4. 学習が成功した場合のみ、pending エントリをスコアリングして `score` を更新する
+   4. pending エントリをスコアリングして `score` を更新する
+      - pending エントリの更新内容を `sorting_state` に反映する。
 
 ## 特徴量
 
