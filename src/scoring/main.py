@@ -207,7 +207,7 @@ class ScoringRepository:
                 sorting_state.c.filename == filename,
                 sorting_state.c.shooting_date == shootingDate,
             )
-            .values(score=score, learned=True)
+            .values(score=score)
         )
         with self._engine.connect() as conn:
             conn.execute(stmt)

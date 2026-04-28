@@ -333,7 +333,7 @@ class TestScoringRepository:
     # --- updateScore ---
 
     def test_update_score_executes_update_sql(self, tmp_path: Path) -> None:
-        """UPDATE sorting_state SQL が score と learned を更新すること。"""
+        """UPDATE sorting_state SQL が score を更新すること。"""
         repo, mock_engine = self._make_repo_with_engine(tmp_path)
         mock_conn = self._setup_conn(mock_engine)
 
@@ -350,6 +350,20 @@ class TestScoringRepository:
         repo.updateScore("actor_a", "img001.jpg", "2026-04-01", 0.75)
 
         mock_conn.commit.assert_called_once_with()
+
+    def test_update_score_does_not_set_learned(self, tmp_path: Path) -> None:
+        """updateScore が learned を更新しないこと（pending エントリの score のみ更新）。"""
+        from sqlalchemy.dialects import mysql as mysql_dialect
+
+        repo, mock_engine = self._make_repo_with_engine(tmp_path)
+        mock_conn = self._setup_conn(mock_engine)
+
+        repo.updateScore("actor_a", "img001.jpg", "2026-04-01", 0.85)
+
+        stmt = mock_conn.execute.call_args.args[0]
+        compiled_sql = stmt.compile(dialect=mysql_dialect.dialect()).string
+
+        assert "learned" not in compiled_sql
 
     # --- saveModel ---
 
