@@ -16,11 +16,9 @@
    3. **labeled エントリがある場合のみ**学習を実行する
       - ランダムフォレスト + GridSearchCV でハイパーパラメータチューニング
       - 学習済みモデルを `DATA_ROOT/{actor}_model.joblib` に保存する
-      - labeled エントリの `learned` を `true` に更新する
-      - labeled エントリの更新内容を `sorting_state` に反映する。
+      - labeled エントリの `learned` を `true` に更新し `sorting_state` に反映する。
       - 学習結果（サンプル数・訓練精度）を標準出力に表示する
-   4. pending エントリをスコアリングして `score` を更新する
-      - pending エントリの更新内容を `sorting_state` に反映する。
+   4. pending エントリをスコアリングして `score` を更新し `sorting_state` に反映する。
 
 ## 特徴量
 
