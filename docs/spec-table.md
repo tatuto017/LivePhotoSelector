@@ -39,6 +39,7 @@ DeepFace 解析結果を格納するテーブル。マイグレーション: `mi
 | 学習済み | learned | boolean | NO | | false |
 | 選択日 | selected_at | datetime | YES | | NULL |
 | 公開 | public | boolean | NO | | false |
+| 移動済み | finalize | boolean | NO | | false |
 
 ## データの更新タイミング
 

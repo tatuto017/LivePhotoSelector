@@ -81,7 +81,7 @@ class FinalizeRepository:
         return [row.actor_id for row in rows]
 
     def loadFinalizedEntries(self, actor: str) -> list:
-        """sorting_state テーブルから ok / ng の処理対象エントリを返す。
+        """sorting_state テーブルから ok / ng かつ未整理（finalize=false）の処理対象エントリを返す。
 
         Args:
             actor: 被写体 ID。
@@ -100,6 +100,7 @@ class FinalizeRepository:
             .where(
                 sorting_state.c.actor_id == actor,
                 sorting_state.c.selection_state.in_(["ok", "ng"]),
+                sorting_state.c.finalize == False,  # noqa: E712
             )
             .order_by(sorting_state.c.filename)
         )
@@ -115,6 +116,29 @@ class FinalizeRepository:
                 "selectedAt": str(row.selected_at) if row.selected_at is not None else None,
             })
         return result
+
+    def updateFinalize(self, actor: str, filename: str, shootingDate: str) -> None:
+        """sorting_state テーブルの指定エントリで finalize を true に更新する。
+
+        ファイル整理（移動または削除）完了後に呼び出す。
+
+        Args:
+            actor: 被写体 ID。
+            filename: ファイル名。
+            shootingDate: 撮影日文字列（YYYY-MM-DD）。
+        """
+        stmt = (
+            update(sorting_state)
+            .where(
+                sorting_state.c.actor_id == actor,
+                sorting_state.c.filename == filename,
+                sorting_state.c.shooting_date == shootingDate,
+            )
+            .values(finalize=True)
+        )
+        with self._engine.connect() as conn:
+            conn.execute(stmt)
+            conn.commit()
 
     def updatePublic(self, actor: str) -> None:
         """sorting_state テーブルの指定 actor の全エントリで public を true に更新する。
@@ -275,6 +299,7 @@ def _run_finalize_for_actor(
             # ng: images/ から削除
             finalizer.deleteFromImages(actor, entry["filename"])
             print(f"[INFO] Deleted: {actor}/{entry['filename']}")
+        repository.updateFinalize(actor, entry["filename"], entry["shootingDate"])
 
 
 def main() -> None:
