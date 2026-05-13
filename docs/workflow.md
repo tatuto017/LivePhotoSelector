@@ -28,7 +28,7 @@
 
 2. 振り分けミスした写真を学習させる
    # 事前に SORTING_ROOT/master_photos/{actor}/ に学習させる写真を配置する
-   # 学習後、配置した写真は自動的に削除され member_features.pt が更新される
+   # 学習後、配置した写真は自動的に振り分け結果ディレクトリ（sorted_results/{actor}/）へ移動され member_features.pt が更新される
    python -m src.sorting.main --learn
 
 3. 振り分け済み写真を解析作業ディレクトリへ移動

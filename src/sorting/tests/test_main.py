@@ -335,7 +335,7 @@ class TestLearner:
         features_path = tmp_path / FEATURES_FILE
         features_db = {"actor_a": MagicMock()}
 
-        result = learner.learn(tmp_path / MASTER_DIR, features_path, features_db)
+        result = learner.learn(tmp_path / MASTER_DIR, features_path, features_db, tmp_path / OUTPUT_DIR)
 
         captured = capsys.readouterr()
         assert "学習用データがありません。" in captured.out
@@ -350,14 +350,15 @@ class TestLearner:
         features_path = tmp_path / FEATURES_FILE
 
         with patch("src.sorting.main.tqdm", side_effect=lambda x, **kw: x):
-            learner.learn(tmp_path / MASTER_DIR, features_path, {})
+            learner.learn(tmp_path / MASTER_DIR, features_path, {}, tmp_path / OUTPUT_DIR)
 
         mock_extractor.extract.assert_not_called()
 
-    def test_learn_extracts_features_and_deletes_image(self, tmp_path: Path) -> None:
-        """特徴量抽出後に deleteImage が呼ばれること。"""
+    def test_learn_extracts_features_and_moves_image_to_output_dir(self, tmp_path: Path) -> None:
+        """特徴量抽出後に moveImage が振り分け結果ディレクトリへ呼ばれること。"""
         learner, mock_repo, mock_extractor = self._make_learner()
         master_dir = tmp_path / MASTER_DIR
+        output_dir = tmp_path / OUTPUT_DIR
         mock_repo.listMasterActors.return_value = ["actor_a"]
         mock_repo.listActorImages.return_value = ["img.jpg"]
         features_path = tmp_path / FEATURES_FILE
@@ -368,15 +369,21 @@ class TestLearner:
         with patch("src.sorting.main.tqdm", side_effect=lambda x, **kw: x):
             with patch("src.sorting.main.torch") as mock_torch:
                 mock_torch.cat.return_value = MagicMock()
-                learner.learn(master_dir, features_path, {})
+                learner.learn(master_dir, features_path, {}, output_dir)
 
         mock_extractor.extract.assert_called_once_with(master_dir / "actor_a" / "img.jpg")
-        mock_repo.deleteImage.assert_called_once_with(master_dir / "actor_a" / "img.jpg")
+        mock_repo.moveImage.assert_called_once_with(
+            master_dir / "actor_a" / "img.jpg",
+            output_dir / "actor_a",
+            "img.jpg",
+        )
+        mock_repo.deleteImage.assert_not_called()
 
     def test_learn_adds_new_actor_to_db(self, tmp_path: Path) -> None:
         """新規 actor の特徴量が DB に追加されること。"""
         learner, mock_repo, mock_extractor = self._make_learner()
         master_dir = tmp_path / MASTER_DIR
+        output_dir = tmp_path / OUTPUT_DIR
         mock_repo.listMasterActors.return_value = ["actor_new"]
         mock_repo.listActorImages.return_value = ["img.jpg"]
         features_path = tmp_path / FEATURES_FILE
@@ -388,7 +395,7 @@ class TestLearner:
         with patch("src.sorting.main.tqdm", side_effect=lambda x, **kw: x):
             with patch("src.sorting.main.torch") as mock_torch:
                 mock_torch.cat.return_value = mock_new_tensor
-                result = learner.learn(master_dir, features_path, {})
+                result = learner.learn(master_dir, features_path, {}, output_dir)
 
         assert "actor_new" in result
         assert result["actor_new"] is mock_new_tensor
@@ -412,7 +419,7 @@ class TestLearner:
         with patch("src.sorting.main.tqdm", side_effect=lambda x, **kw: x):
             with patch("src.sorting.main.torch") as mock_torch:
                 mock_torch.cat.side_effect = [mock_new_tensor, mock_merged_tensor]
-                result = learner.learn(master_dir, features_path, features_db)
+                result = learner.learn(master_dir, features_path, features_db, tmp_path / OUTPUT_DIR)
 
         # torch.cat が2回呼ばれ、2回目で既存テンソルと結合されること
         assert mock_torch.cat.call_count == 2
@@ -422,6 +429,7 @@ class TestLearner:
         """画像抽出でエラーが発生しても処理が続行されること。"""
         learner, mock_repo, mock_extractor = self._make_learner()
         master_dir = tmp_path / MASTER_DIR
+        output_dir = tmp_path / OUTPUT_DIR
         mock_repo.listMasterActors.return_value = ["actor_a"]
         mock_repo.listActorImages.return_value = ["bad.jpg", "good.jpg"]
         features_path = tmp_path / FEATURES_FILE
@@ -433,12 +441,17 @@ class TestLearner:
             with patch("src.sorting.main.tqdm.write"):
                 with patch("src.sorting.main.torch") as mock_torch:
                     mock_torch.cat.return_value = MagicMock()
-                    learner.learn(master_dir, features_path, {})
+                    learner.learn(master_dir, features_path, {}, output_dir)
 
         # エラーが発生しても2枚目が処理されること
         assert mock_extractor.extract.call_count == 2
-        # エラーした画像は削除されないこと
-        mock_repo.deleteImage.assert_called_once_with(master_dir / "actor_a" / "good.jpg")
+        # エラーした画像は移動されず、成功した画像のみ移動されること
+        mock_repo.moveImage.assert_called_once_with(
+            master_dir / "actor_a" / "good.jpg",
+            output_dir / "actor_a",
+            "good.jpg",
+        )
+        mock_repo.deleteImage.assert_not_called()
 
     def test_learn_saves_features_after_processing(self, tmp_path: Path) -> None:
         """学習後に saveFeatures が呼ばれること。"""
@@ -453,7 +466,7 @@ class TestLearner:
         with patch("src.sorting.main.tqdm", side_effect=lambda x, **kw: x):
             with patch("src.sorting.main.torch") as mock_torch:
                 mock_torch.cat.return_value = MagicMock()
-                learner.learn(master_dir, features_path, {})
+                learner.learn(master_dir, features_path, {}, tmp_path / OUTPUT_DIR)
 
         mock_repo.saveFeatures.assert_called_once_with(features_path, mock_repo.saveFeatures.call_args[0][1])
 
@@ -470,7 +483,7 @@ class TestLearner:
         with patch("src.sorting.main.tqdm", side_effect=lambda x, **kw: x):
             with patch("src.sorting.main.torch") as mock_torch:
                 mock_torch.cat.return_value = MagicMock()
-                learner.learn(master_dir, features_path, {})
+                learner.learn(master_dir, features_path, {}, tmp_path / OUTPUT_DIR)
 
         captured = capsys.readouterr()
         assert "学習が完了しました！" in captured.out
@@ -731,6 +744,7 @@ class TestLearn:
             sorting_root / MASTER_DIR,
             sorting_root / FEATURES_FILE,
             features_db,
+            sorting_root / OUTPUT_DIR,
         )
 
 
