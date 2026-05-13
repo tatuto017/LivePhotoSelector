@@ -219,16 +219,17 @@ class Learner:
         self._repository = repository
         self._extractor = extractor
 
-    def learn(self, master_dir: Path, features_path: Path, features_db: dict) -> dict:
+    def learn(self, master_dir: Path, features_path: Path, features_db: dict, output_dir: Path) -> dict:
         """master_photos の写真を学習し、特徴量データベースを更新・保存する。
 
         各 actor ディレクトリの画像から特徴量を抽出して既存 DB に追記し、
-        学習済み画像を削除する。結果を features_path に保存する。
+        学習済み画像を振り分け結果ディレクトリに移動する。結果を features_path に保存する。
 
         Args:
             master_dir: master_photos ディレクトリのパス。
             features_path: member_features.pt のパス。
             features_db: 既存の特徴量データベース（更新のベースとして使用）。
+            output_dir: 振り分け結果ディレクトリのパス（学習済み画像の移動先）。
 
         Returns:
             更新後の特徴量データベース。
@@ -253,7 +254,7 @@ class Learner:
                 try:
                     feat = self._extractor.extract(img_path)
                     new_feats.append(feat)
-                    self._repository.deleteImage(img_path)
+                    self._repository.moveImage(img_path, output_dir / actor, filename)
                 except Exception as e:
                     tqdm.write(f"学習エラー {filename}: {e}")
 
@@ -373,9 +374,10 @@ def learn(
 
     features_path = sorting_root / FEATURES_FILE
     master_dir = sorting_root / MASTER_DIR
+    output_dir = sorting_root / OUTPUT_DIR
 
     features_db = repository.loadFeatures(features_path)
-    learner.learn(master_dir, features_path, features_db)
+    learner.learn(master_dir, features_path, features_db, output_dir)
 
     print("[INFO] Learning complete.")
 
