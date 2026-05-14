@@ -14,8 +14,6 @@
 1. `sorting_state` テーブルの全 actor の `public` を `true` に更新する。
    - これにより Web アプリ上で写真が表示対象になる。
 
-> ※ `analyze.sh` を再実行すると ANALYZE_ROOT が空であることを検出し、自動的にこのフェーズを実行する。
-
 ### フェーズ2: 選択後の整理（選択完了後）
 `sorting_state` のレコードの削除はしないで、下記のファイル処理のみ行う。
 1. `sorting_state` テーブルから `finalize` が `false` のレコードを取得する。
