@@ -6,9 +6,10 @@
 [Mac] 撮影写真 → {DATA_ROOT}/inbox/{actor}/ に配置
     → DeepFace 解析（main.py）
             → EXIF から撮影日取得
-            → {DATA_ROOT}/inbox/ → {DATA_ROOT}/images/ に移動
-            → MariaDB の analysis_records テーブルに INSERT
+            → {DATA_ROOT}/inbox/ → {ANALYZE_ROOT}/ に移動・MariaDB の analysis_records テーブルに INSERT
             → MariaDB の sorting_state テーブルに INSERT
+            ↓ 解析完了後、{ANALYZE_ROOT}/{actor}/ を手動で {DATA_ROOT}/images/{actor}/ に移動
+            → analyze.sh 再実行で sorting_state.public を true に更新（公開処理）
             Raspberry Pi 4（MariaDB サーバー稼働）
                 → Next.js が images/ を配信 + MariaDB を直接読み書き
                     ↓ Cloudflare Tunnel（外出先）/ LAN（自宅）
@@ -37,10 +38,12 @@
 
 4. 写真を {DATA_ROOT}/inbox/{actor}/ に配置する
 
-5. Mac で解析（{DATA_ROOT}/inbox → {DATA_ROOT}/images へ移動 + MariaDB に登録）
+5. Mac で解析（{DATA_ROOT}/inbox → {ANALYZE_ROOT} へ移動 + MariaDB に登録）
    bash analyze.sh
-   ※ OOM Kill 時は自動再起動。sorting_state の未処理件数が 0 になるまでループする
+   ※ OOM Kill 時は自動再起動（ANALYZE_ROOT のファイルがなくなるまでループ）
    ※ MariaDB に INSERT されるため Pi 側から即時参照可能
+   ※ 解析完了後、ANALYZE_ROOT/{actor}/ のファイルを手動で DATA_ROOT/images/{actor}/ に移動し、
+      analyze.sh を再実行すると公開処理（sorting_state.public を true に更新）が行われる
 
 6. iPhone で Pi にアクセスして OK/NG 選択
    （右スワイプ = OK、左スワイプ = NG）
