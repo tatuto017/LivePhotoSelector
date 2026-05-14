@@ -25,7 +25,7 @@
 
 2. 振り分けミスした写真を学習させる
    # 事前に SORTING_ROOT/master_photos/{actor}/ に学習させる写真を配置する
-   # 学習後、配置した写真は自動的に削除され member_features.pt が更新される
+   # 学習後、配置した写真は自動的に振り分け結果ディレクトリ（sorted_results/{actor}/）へ移動され member_features.pt が更新される
    python -m src.sorting.main --learn
 
 3. 振り分け済み写真を解析作業ディレクトリへ移動
@@ -34,11 +34,12 @@
 
 4. 写真を {DATA_ROOT}/inbox/{actor}/ に配置する
 
-5. Mac で解析（inbox → images へ移動 + MariaDB に登録）
+5. Mac で解析（inbox → ANALYZE_ROOT へ移動 + MariaDB に登録）
    bash analyze.sh
-   ※ OOM Kill 時は自動再起動。file_list.txt が空になるまでループする
-   ※ 1 枚処理するたびに file_list.txt からエントリを削除（再起動後の続きから再開対応）
+   ※ OOM Kill 時は自動再起動（ANALYZE_ROOT が空になるまでループ）
    ※ MariaDB に INSERT されるため Pi 側から即時参照可能
+   ※ 解析完了後、ANALYZE_ROOT/{actor}/ のファイルを手動で DATA_ROOT/images/{actor}/ に移動し、
+      analyze.sh を再実行すると公開処理（sorting_state.public を true に更新）が行われる
 
 6. iPhone で Pi にアクセスして OK/NG 選択
    右スワイプ = OK  /  左スワイプ = NG
