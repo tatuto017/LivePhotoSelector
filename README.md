@@ -36,17 +36,19 @@
    bash analyze.sh
    ※ OOM Kill 時は自動再起動（ANALYZE_ROOT が空になるまでループ）
    ※ MariaDB に INSERT されるため Pi 側から即時参照可能
-   ※ 解析完了後、ANALYZE_ROOT/{actor}/ のファイルを手動で DATA_ROOT/images/{actor}/ に移動し、
-      python -m src.finalize.main --publish を実行すると公開処理（sorting_state.public を true に更新）が行われる
 
-5. iPhone で Pi にアクセスして OK/NG 選択
+5. 解析済み写真を公開（{ANALYZE_ROOT}/{actor}/ のファイルを手動で {DATA_ROOT}/images/{actor}/ に移動後）
+   python -m src.finalize.main --publish
+   ※ sorting_state.public を true に更新し、Web アプリ上で写真が表示対象になる
+
+6. iPhone で Pi にアクセスして OK/NG 選択
    右スワイプ = OK  /  左スワイプ = NG
    選択結果は MariaDB の sorting_state テーブルに即時書き込まれる
 
-6. スコアリング（演者ごとの傾向を学習・スコア更新）
+7. スコアリング（演者ごとの傾向を学習・スコア更新）
    python -m src.scoring.main
 
-7. 写真整理（OK → confirmed/ へ移動、NG → 削除）
+8. 写真整理（OK → confirmed/ へ移動、NG → 削除）
    python -m src.finalize.main
 ```
 
@@ -131,9 +133,12 @@ npm start         # 本番起動
 ### Python スクリプト
 
 ```bash
-# 解析（inbox の写真を DeepFace で解析して MariaDB に登録）
+# 解析（ANALYZE_ROOT の写真を DeepFace で解析して MariaDB に登録）
 # OOM Kill 時の自動再起動ループ込み
 bash analyze.sh
+
+# 公開（ANALYZE_ROOT/{actor}/ を手動で DATA_ROOT/images/{actor}/ へ移動後に実行）
+python -m src.finalize.main --publish
 
 # スコアリング（Scikit-learn で学習・スコア更新）
 python -m src.scoring.main
