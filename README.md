@@ -32,23 +32,21 @@
    python -m src.move.main
    ※ sorting_state に同名エントリ（learned=false）が存在する場合はリネームして移動
 
-4. 写真を {DATA_ROOT}/inbox/{actor}/ に配置する
-
-5. Mac で解析（inbox → ANALYZE_ROOT へ移動 + MariaDB に登録）
+4. Mac で解析（{ANALYZE_ROOT} の写真を DeepFace で解析して MariaDB に登録）
    bash analyze.sh
    ※ OOM Kill 時は自動再起動（ANALYZE_ROOT が空になるまでループ）
    ※ MariaDB に INSERT されるため Pi 側から即時参照可能
    ※ 解析完了後、ANALYZE_ROOT/{actor}/ のファイルを手動で DATA_ROOT/images/{actor}/ に移動し、
-      analyze.sh を再実行すると公開処理（sorting_state.public を true に更新）が行われる
+      python -m src.finalize.main --publish を実行すると公開処理（sorting_state.public を true に更新）が行われる
 
-6. iPhone で Pi にアクセスして OK/NG 選択
+5. iPhone で Pi にアクセスして OK/NG 選択
    右スワイプ = OK  /  左スワイプ = NG
    選択結果は MariaDB の sorting_state テーブルに即時書き込まれる
 
-7. スコアリング（演者ごとの傾向を学習・スコア更新）
+6. スコアリング（演者ごとの傾向を学習・スコア更新）
    python -m src.scoring.main
 
-8. 写真整理（OK → confirmed/ へ移動、NG → 削除）
+7. 写真整理（OK → confirmed/ へ移動、NG → 削除）
    python -m src.finalize.main
 ```
 
