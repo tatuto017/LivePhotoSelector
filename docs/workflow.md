@@ -32,6 +32,12 @@
    # 学習後、配置した写真は自動的に振り分け結果ディレクトリ（sorted_results/{actor}/）へ移動され member_features.pt が更新される
    python -m src.sorting.main --learn
 
+   # 学習済みの被写体IDを確認したい場合
+   python -m src.sorting.main --list
+
+   # 誤った被写体IDで学習してしまった場合はリネーム
+   python -m src.sorting.main --rename <OLD_ID> <NEW_ID>
+
 3. 振り分け済み写真を解析作業ディレクトリへ移動
    python -m src.move.main
    ※ sorting_state に同名エントリ（learned=false）が存在する場合はリネームして移動
