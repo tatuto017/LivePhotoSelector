@@ -32,13 +32,19 @@ python -m src.sorting.main --workers 8
 
 # 学習のみ
 python -m src.sorting.main --learn
+
+# 学習済み被写体ID 一覧表示
+python -m src.sorting.main --list
+
+# 被写体ID リネーム（誤って学習した被写体IDを修正）
+python -m src.sorting.main --rename <OLD_ID> <NEW_ID>
 ```
 
 ## クラス構成
 
 | クラス | 役割 |
 | --- | --- |
-| `FeatureRepository` | `member_features.pt` の読み書き・画像ファイル操作 |
+| `FeatureRepository` | `member_features.pt` の読み書き・画像ファイル操作・被写体IDリネーム |
 | `FeatureExtractor` | CLIP モデルで画像の特徴量ベクトルを抽出（正規化済み） |
 | `Learner` | 学習モード: `master_photos/` から特徴量を構築・更新 |
 | `Classifier` | 振り分けモード: `all_photos/` を `sorted_results/` に並列振り分け |

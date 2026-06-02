@@ -16,6 +16,8 @@ from src.sorting.main import (
     _load_env,
     _load_model,
     learn,
+    list_actors,
+    rename_actor,
     run,
     FEATURES_FILE,
     MASTER_DIR,
@@ -253,6 +255,59 @@ class TestFeatureRepository:
             repo.deleteImage(img_path)
 
         mock_remove.assert_called_once_with(str(img_path))
+
+    # --- renameActor ---
+
+    def test_rename_actor_returns_new_dict_with_renamed_key(self) -> None:
+        """old_actor を new_actor に変更した新しい辞書を返すこと。"""
+        repo = FeatureRepository()
+        mock_tensor = MagicMock()
+        features_db = {"actor_a": mock_tensor}
+
+        result = repo.renameActor(features_db, "actor_a", "actor_b")
+
+        assert "actor_b" in result
+        assert "actor_a" not in result
+        assert result["actor_b"] is mock_tensor
+
+    def test_rename_actor_does_not_mutate_original_db(self) -> None:
+        """元の features_db を変更しないこと。"""
+        repo = FeatureRepository()
+        mock_tensor = MagicMock()
+        features_db = {"actor_a": mock_tensor}
+
+        repo.renameActor(features_db, "actor_a", "actor_b")
+
+        assert "actor_a" in features_db
+        assert "actor_b" not in features_db
+
+    def test_rename_actor_preserves_other_actors(self) -> None:
+        """リネーム対象以外の actor はそのまま保持されること。"""
+        repo = FeatureRepository()
+        tensor_a = MagicMock()
+        tensor_c = MagicMock()
+        features_db = {"actor_a": tensor_a, "actor_c": tensor_c}
+
+        result = repo.renameActor(features_db, "actor_a", "actor_b")
+
+        assert "actor_c" in result
+        assert result["actor_c"] is tensor_c
+
+    def test_rename_actor_raises_key_error_when_old_actor_not_found(self) -> None:
+        """old_actor が存在しない場合、KeyError が発生すること。"""
+        repo = FeatureRepository()
+        features_db = {"actor_b": MagicMock()}
+
+        with pytest.raises(KeyError):
+            repo.renameActor(features_db, "actor_a", "actor_c")
+
+    def test_rename_actor_raises_value_error_when_new_actor_already_exists(self) -> None:
+        """new_actor が既に存在する場合、ValueError が発生すること。"""
+        repo = FeatureRepository()
+        features_db = {"actor_a": MagicMock(), "actor_b": MagicMock()}
+
+        with pytest.raises(ValueError):
+            repo.renameActor(features_db, "actor_a", "actor_b")
 
 
 # ---------------------------------------------------------------------------
@@ -869,3 +924,168 @@ class TestRun:
             features_db,
             max_workers=4,
         )
+
+
+# ---------------------------------------------------------------------------
+# list_actors
+# ---------------------------------------------------------------------------
+
+
+class TestListActors:
+    """list_actors のテスト。"""
+
+    def _make_mock_repo(self, features_db=None):
+        """テスト用モックリポジトリを生成する。"""
+        mock_repo = MagicMock(spec=FeatureRepository)
+        mock_repo.loadFeatures.return_value = features_db if features_db is not None else {}
+        return mock_repo
+
+    def test_calls_load_env(self) -> None:
+        """_load_env が呼ばれること。"""
+        mock_repo = self._make_mock_repo()
+
+        with patch("src.sorting.main._load_env") as mock_load_env:
+            list_actors(repository=mock_repo, sorting_root=Path("/tmp/sorting"))
+
+        mock_load_env.assert_called_once()
+
+    def test_uses_sorting_root_env_var_when_not_provided(self, monkeypatch) -> None:
+        """sorting_root が None の場合、SORTING_ROOT 環境変数からパスを取得すること。"""
+        monkeypatch.setenv("SORTING_ROOT", "/tmp/sorting_test")
+        mock_repo = self._make_mock_repo()
+
+        with patch("src.sorting.main._load_env"):
+            list_actors(repository=mock_repo)
+
+        mock_repo.loadFeatures.assert_called_once_with(
+            Path("/tmp/sorting_test") / FEATURES_FILE
+        )
+
+    def test_creates_repository_when_not_provided(self, monkeypatch) -> None:
+        """repository が None の場合、FeatureRepository が生成されること。"""
+        monkeypatch.setenv("SORTING_ROOT", "/tmp/sorting")
+
+        with patch("src.sorting.main._load_env"):
+            with patch("src.sorting.main.FeatureRepository") as mock_repo_cls:
+                mock_repo_cls.return_value.loadFeatures.return_value = {}
+                list_actors()
+
+        mock_repo_cls.assert_called_once()
+
+    def test_calls_load_features_with_correct_path(self) -> None:
+        """loadFeatures が正しいパスで呼ばれること。"""
+        mock_repo = self._make_mock_repo()
+        sorting_root = Path("/tmp/sorting")
+
+        with patch("src.sorting.main._load_env"):
+            list_actors(repository=mock_repo, sorting_root=sorting_root)
+
+        mock_repo.loadFeatures.assert_called_once_with(sorting_root / FEATURES_FILE)
+
+    def test_returns_sorted_actor_list(self) -> None:
+        """ソートされた actor リストを返すこと。"""
+        mock_repo = self._make_mock_repo({"actor_b": MagicMock(), "actor_a": MagicMock()})
+
+        with patch("src.sorting.main._load_env"):
+            result = list_actors(repository=mock_repo, sorting_root=Path("/tmp/sorting"))
+
+        assert result == ["actor_a", "actor_b"]
+
+    def test_returns_empty_list_when_no_actors(self) -> None:
+        """features_db が空の場合、空リストを返すこと。"""
+        mock_repo = self._make_mock_repo({})
+
+        with patch("src.sorting.main._load_env"):
+            result = list_actors(repository=mock_repo, sorting_root=Path("/tmp/sorting"))
+
+        assert result == []
+
+
+# ---------------------------------------------------------------------------
+# rename_actor
+# ---------------------------------------------------------------------------
+
+
+class TestRenameActor:
+    """rename_actor のテスト。"""
+
+    def _make_mock_repo(self, features_db=None, renamed_db=None):
+        """テスト用モックリポジトリを生成する。"""
+        mock_repo = MagicMock(spec=FeatureRepository)
+        mock_repo.loadFeatures.return_value = features_db if features_db is not None else {}
+        mock_repo.renameActor.return_value = renamed_db if renamed_db is not None else {}
+        return mock_repo
+
+    def test_calls_load_env(self) -> None:
+        """_load_env が呼ばれること。"""
+        mock_tensor = MagicMock()
+        mock_repo = self._make_mock_repo({"actor_a": mock_tensor}, {"actor_b": mock_tensor})
+
+        with patch("src.sorting.main._load_env") as mock_load_env:
+            rename_actor("actor_a", "actor_b", repository=mock_repo, sorting_root=Path("/tmp/sorting"))
+
+        mock_load_env.assert_called_once()
+
+    def test_uses_sorting_root_env_var_when_not_provided(self, monkeypatch) -> None:
+        """sorting_root が None の場合、SORTING_ROOT 環境変数からパスを取得すること。"""
+        monkeypatch.setenv("SORTING_ROOT", "/tmp/sorting_test")
+        mock_tensor = MagicMock()
+        mock_repo = self._make_mock_repo({"actor_a": mock_tensor}, {"actor_b": mock_tensor})
+
+        with patch("src.sorting.main._load_env"):
+            rename_actor("actor_a", "actor_b", repository=mock_repo)
+
+        mock_repo.loadFeatures.assert_called_once_with(
+            Path("/tmp/sorting_test") / FEATURES_FILE
+        )
+
+    def test_creates_repository_when_not_provided(self, monkeypatch) -> None:
+        """repository が None の場合、FeatureRepository が生成されること。"""
+        monkeypatch.setenv("SORTING_ROOT", "/tmp/sorting")
+        mock_tensor = MagicMock()
+
+        with patch("src.sorting.main._load_env"):
+            with patch("src.sorting.main.FeatureRepository") as mock_repo_cls:
+                mock_repo_cls.return_value.loadFeatures.return_value = {"actor_a": mock_tensor}
+                mock_repo_cls.return_value.renameActor.return_value = {"actor_b": mock_tensor}
+                rename_actor("actor_a", "actor_b")
+
+        mock_repo_cls.assert_called_once()
+
+    def test_calls_load_features_then_rename_then_save(self) -> None:
+        """loadFeatures → renameActor → saveFeatures の順に呼ばれること。"""
+        mock_tensor = MagicMock()
+        features_db = {"actor_a": mock_tensor}
+        updated_db = {"actor_b": mock_tensor}
+        mock_repo = self._make_mock_repo(features_db, updated_db)
+        sorting_root = Path("/tmp/sorting")
+
+        call_order = []
+        mock_repo.loadFeatures.side_effect = lambda *a: (call_order.append("load"), features_db)[1]
+        mock_repo.renameActor.side_effect = lambda *a: (call_order.append("rename"), updated_db)[1]
+        mock_repo.saveFeatures.side_effect = lambda *a: call_order.append("save")
+
+        with patch("src.sorting.main._load_env"):
+            rename_actor("actor_a", "actor_b", repository=mock_repo, sorting_root=sorting_root)
+
+        assert call_order == ["load", "rename", "save"]
+        mock_repo.renameActor.assert_called_once_with(features_db, "actor_a", "actor_b")
+        mock_repo.saveFeatures.assert_called_once_with(sorting_root / FEATURES_FILE, updated_db)
+
+    def test_raises_key_error_when_old_actor_not_found(self) -> None:
+        """old_actor が存在しない場合、KeyError が伝播すること。"""
+        mock_repo = self._make_mock_repo({"actor_b": MagicMock()})
+        mock_repo.renameActor.side_effect = KeyError("actor_a")
+
+        with patch("src.sorting.main._load_env"):
+            with pytest.raises(KeyError):
+                rename_actor("actor_a", "actor_c", repository=mock_repo, sorting_root=Path("/tmp/sorting"))
+
+    def test_raises_value_error_when_new_actor_already_exists(self) -> None:
+        """new_actor が既に存在する場合、ValueError が伝播すること。"""
+        mock_repo = self._make_mock_repo({"actor_a": MagicMock(), "actor_b": MagicMock()})
+        mock_repo.renameActor.side_effect = ValueError("actor_b")
+
+        with patch("src.sorting.main._load_env"):
+            with pytest.raises(ValueError):
+                rename_actor("actor_a", "actor_b", repository=mock_repo, sorting_root=Path("/tmp/sorting"))

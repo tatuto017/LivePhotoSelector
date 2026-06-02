@@ -159,6 +159,29 @@ class FeatureRepository:
         """
         os.remove(str(path))
 
+    def renameActor(self, features_db: dict, old_actor: str, new_actor: str) -> dict:
+        """特徴量データベース内の actor 名を変更した新しい辞書を返す。
+
+        元の features_db は変更せず、actor 名を変更した新しい辞書を返す。
+
+        Args:
+            features_db: 既存の特徴量データベース。
+            old_actor: 変更前の actor 名。
+            new_actor: 変更後の actor 名。
+
+        Returns:
+            actor 名を変更した新しい特徴量データベース。
+
+        Raises:
+            KeyError: old_actor が features_db に存在しない場合。
+            ValueError: new_actor が既に features_db に存在する場合。
+        """
+        if old_actor not in features_db:
+            raise KeyError(f"被写体ID '{old_actor}' が見つかりません。")
+        if new_actor in features_db:
+            raise ValueError(f"被写体ID '{new_actor}' は既に存在します。")
+        return {(new_actor if k == old_actor else k): v for k, v in features_db.items()}
+
 
 # ---------------------------------------------------------------------------
 # 特徴量抽出器
@@ -340,6 +363,77 @@ class Classifier:
 # ---------------------------------------------------------------------------
 
 
+def list_actors(
+    repository: Optional[FeatureRepository] = None,
+    sorting_root: Optional[Path] = None,
+) -> list:
+    """学習済み被写体IDの一覧を表示する。
+
+    member_features.pt に登録されている被写体 ID をソート順で一覧表示する。
+
+    Args:
+        repository: FeatureRepository インスタンス（DI 用）。
+        sorting_root: SORTING_ROOT パス（DI 用）。省略時は環境変数を使用。
+
+    Returns:
+        被写体 ID のリスト（ソート済み）。
+    """
+    _load_env()
+
+    if sorting_root is None:
+        sorting_root = Path(os.environ["SORTING_ROOT"])
+
+    if repository is None:
+        repository = FeatureRepository()
+
+    features_path = sorting_root / FEATURES_FILE
+    features_db = repository.loadFeatures(features_path)
+
+    actors = sorted(features_db.keys())
+    if not actors:
+        print("学習済みの被写体IDがありません。")
+    else:
+        print(f"学習済み被写体ID一覧（{len(actors)}件）:")
+        for actor in actors:
+            print(f"  - {actor}")
+    return actors
+
+
+def rename_actor(
+    old_actor: str,
+    new_actor: str,
+    repository: Optional[FeatureRepository] = None,
+    sorting_root: Optional[Path] = None,
+) -> None:
+    """学習済みモデルの被写体IDを変更する。
+
+    member_features.pt の actor キーを old_actor から new_actor に変更して保存する。
+
+    Args:
+        old_actor: 変更前の被写体ID。
+        new_actor: 変更後の被写体ID。
+        repository: FeatureRepository インスタンス（DI 用）。
+        sorting_root: SORTING_ROOT パス（DI 用）。省略時は環境変数を使用。
+
+    Raises:
+        KeyError: old_actor が存在しない場合。
+        ValueError: new_actor が既に存在する場合。
+    """
+    _load_env()
+
+    if sorting_root is None:
+        sorting_root = Path(os.environ["SORTING_ROOT"])
+
+    if repository is None:
+        repository = FeatureRepository()
+
+    features_path = sorting_root / FEATURES_FILE
+    features_db = repository.loadFeatures(features_path)
+    updated_db = repository.renameActor(features_db, old_actor, new_actor)
+    repository.saveFeatures(features_path, updated_db)
+    print(f"被写体ID '{old_actor}' を '{new_actor}' に変更しました。")
+
+
 def learn(
     repository: Optional[FeatureRepository] = None,
     extractor: Optional[FeatureExtractor] = None,
@@ -433,9 +527,15 @@ if __name__ == "__main__":  # pragma: no cover
     parser = argparse.ArgumentParser(description="写真振り分けスクリプト")
     parser.add_argument("--learn", action="store_true", help="学習モードで実行する")
     parser.add_argument("--workers", type=int, default=4, help="並列ワーカー数（デフォルト: 4）")
+    parser.add_argument("--list", action="store_true", help="学習済み被写体ID一覧を表示する")
+    parser.add_argument("--rename", nargs=2, metavar=("OLD", "NEW"), help="被写体IDを変更する（例: --rename old_id new_id）")
     args = parser.parse_args()
 
-    if args.learn:
+    if args.list:
+        list_actors()
+    elif args.rename:
+        rename_actor(args.rename[0], args.rename[1])
+    elif args.learn:
         learn()
     else:
         run(max_workers=args.workers)
