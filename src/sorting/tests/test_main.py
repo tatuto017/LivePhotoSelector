@@ -679,6 +679,79 @@ class TestClassifier:
         assert "1枚の振り分けを開始します" in captured.out
         assert "すべての振り分けが完了しました！" in captured.out
 
+    def test_classify_filters_actors_by_prefix(self, tmp_path: Path) -> None:
+        """prefix 指定時、プレフィックスに一致する actor のみ振り分けに使用されること。"""
+        classifier, mock_repo, mock_extractor = self._make_classifier()
+        target_dir = tmp_path / TARGET_DIR
+        output_dir = tmp_path / OUTPUT_DIR
+        mock_repo.listTargetImages.return_value = ["img.jpg"]
+
+        mock_tensor_a = MagicMock()
+        mock_tensor_b = MagicMock()
+        features_db = {"abc_actor": mock_tensor_a, "xyz_actor": mock_tensor_b}
+
+        mock_target_feat = MagicMock()
+        mock_extractor.extract.return_value = mock_target_feat
+        mock_score = MagicMock()
+        mock_score.item.return_value = 0.9
+        mock_target_feat.__matmul__ = MagicMock(return_value=mock_score)
+
+        with patch("src.sorting.main.tqdm", side_effect=lambda x, **kw: x):
+            classifier.classify(target_dir, output_dir, features_db, prefix="abc")
+
+        # abc_ で始まる actor のみに振り分けられること
+        mock_repo.moveImage.assert_called_once_with(
+            target_dir / "img.jpg",
+            output_dir / "abc_actor",
+            "img.jpg",
+        )
+
+    def test_classify_returns_when_no_actors_match_prefix(self, tmp_path: Path, capsys) -> None:
+        """prefix 指定時、一致する actor がない場合はメッセージを出力して終了すること。"""
+        classifier, mock_repo, mock_extractor = self._make_classifier()
+        features_db = {"actor_a": MagicMock()}
+
+        classifier.classify(tmp_path / TARGET_DIR, tmp_path / OUTPUT_DIR, features_db, prefix="xyz")
+
+        captured = capsys.readouterr()
+        assert "プレフィックスに一致する被写体IDがありません。" in captured.out
+        mock_repo.listTargetImages.assert_not_called()
+
+    def test_classify_uses_all_actors_when_prefix_is_none(self, tmp_path: Path) -> None:
+        """prefix が None の場合、全 actor を対象にすること。"""
+        classifier, mock_repo, mock_extractor = self._make_classifier()
+        target_dir = tmp_path / TARGET_DIR
+        output_dir = tmp_path / OUTPUT_DIR
+        mock_repo.listTargetImages.return_value = ["img.jpg"]
+
+        mock_tensor_a = MagicMock()
+        mock_tensor_b = MagicMock()
+        features_db = {"actor_a": mock_tensor_a, "actor_b": mock_tensor_b}
+
+        mock_target_feat = MagicMock()
+        mock_extractor.extract.return_value = mock_target_feat
+
+        mock_rep_a = MagicMock()
+        mock_rep_b = MagicMock()
+        mock_tensor_a.mean.return_value.float.return_value = mock_rep_a
+        mock_tensor_b.mean.return_value.float.return_value = mock_rep_b
+
+        def matmul_side_effect(x):
+            result = MagicMock()
+            result.item.return_value = 0.9 if x is mock_rep_a.T else 0.3
+            return result
+
+        mock_target_feat.__matmul__ = MagicMock(side_effect=matmul_side_effect)
+
+        with patch("src.sorting.main.tqdm", side_effect=lambda x, **kw: x):
+            classifier.classify(target_dir, output_dir, features_db, prefix=None)
+
+        mock_repo.moveImage.assert_called_once_with(
+            target_dir / "img.jpg",
+            output_dir / "actor_a",
+            "img.jpg",
+        )
+
 
 # ---------------------------------------------------------------------------
 # learn
@@ -923,6 +996,29 @@ class TestRun:
             sorting_root / OUTPUT_DIR,
             features_db,
             max_workers=4,
+            prefix=None,
+        )
+
+    def test_passes_prefix_to_classify(self) -> None:
+        """prefix が classifier.classify に渡されること。"""
+        mock_repo, mock_extractor, mock_classifier = self._make_mocks()
+        sorting_root = Path("/tmp/sorting")
+
+        with patch("src.sorting.main._load_env"):
+            run(
+                repository=mock_repo,
+                extractor=mock_extractor,
+                classifier=mock_classifier,
+                sorting_root=sorting_root,
+                prefix="abc",
+            )
+
+        mock_classifier.classify.assert_called_once_with(
+            sorting_root / TARGET_DIR,
+            sorting_root / OUTPUT_DIR,
+            mock_repo.loadFeatures.return_value,
+            max_workers=4,
+            prefix="abc",
         )
 
 

@@ -313,7 +313,7 @@ class Classifier:
         self._repository = repository
         self._extractor = extractor
 
-    def classify(self, target_dir: Path, output_dir: Path, features_db: dict, max_workers: int = 4) -> None:
+    def classify(self, target_dir: Path, output_dir: Path, features_db: dict, max_workers: int = 4, prefix: Optional[str] = None) -> None:
         """all_photos の写真を人物別に振り分ける。
 
         Args:
@@ -321,10 +321,17 @@ class Classifier:
             output_dir: sorted_results ディレクトリのパス。
             features_db: 学習済み特徴量データベース。
             max_workers: 並列ワーカー数（デフォルト 4）。
+            prefix: 被写体IDのプレフィックス。指定した場合、一致する被写体IDのみを対象にする。
         """
         if not features_db:
             print("学習データがありません。")
             return
+
+        if prefix is not None:
+            features_db = {k: v for k, v in features_db.items() if k.startswith(prefix)}
+            if not features_db:
+                print("プレフィックスに一致する被写体IDがありません。")
+                return
 
         img_files = self._repository.listTargetImages(target_dir)
         if not img_files:
@@ -482,6 +489,7 @@ def run(
     classifier: Optional[Classifier] = None,
     sorting_root: Optional[Path] = None,
     max_workers: int = 4,
+    prefix: Optional[str] = None,
 ) -> None:
     """振り分けのメイン処理。
 
@@ -494,6 +502,7 @@ def run(
         classifier: Classifier インスタンス（DI 用）。
         sorting_root: SORTING_ROOT パス（DI 用）。省略時は環境変数を使用。
         max_workers: 並列ワーカー数（デフォルト 4）。
+        prefix: 被写体IDのプレフィックス。指定した場合、一致する被写体IDのみを振り分け対象にする。
     """
     _load_env()
 
@@ -516,7 +525,7 @@ def run(
     output_dir = sorting_root / OUTPUT_DIR
 
     features_db = repository.loadFeatures(features_path)
-    classifier.classify(target_dir, output_dir, features_db, max_workers=max_workers)
+    classifier.classify(target_dir, output_dir, features_db, max_workers=max_workers, prefix=prefix)
 
     print("[INFO] Sorting complete.")
 
@@ -529,6 +538,7 @@ if __name__ == "__main__":  # pragma: no cover
     parser.add_argument("--workers", type=int, default=4, help="並列ワーカー数（デフォルト: 4）")
     parser.add_argument("--list", action="store_true", help="学習済み被写体ID一覧を表示する")
     parser.add_argument("--rename", nargs=2, metavar=("OLD", "NEW"), help="被写体IDを変更する（例: --rename old_id new_id）")
+    parser.add_argument("--prefix", type=str, default=None, help="被写体IDのプレフィックス（指定した場合、一致する被写体IDのみを振り分け対象にする）")
     args = parser.parse_args()
 
     if args.list:
@@ -538,4 +548,4 @@ if __name__ == "__main__":  # pragma: no cover
     elif args.learn:
         learn()
     else:
-        run(max_workers=args.workers)
+        run(max_workers=args.workers, prefix=args.prefix)
