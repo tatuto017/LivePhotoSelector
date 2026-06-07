@@ -23,6 +23,9 @@
 1. 振り分け（CLIP の学習済み特徴量を使って全体写真を被写体別に振り分け）
    python -m src.sorting.main
 
+   # プレフィックス指定で特定の被写体IDのみに絞って振り分け
+   python -m src.sorting.main --prefix <PREFIX>
+
 2. 振り分けミスした写真を学習させる
    # 事前に SORTING_ROOT/master_photos/{actor}/ に学習させる写真を配置する
    # 学習後、配置した写真は自動的に振り分け結果ディレクトリ（sorted_results/{actor}/）へ移動され member_features.pt が更新される
@@ -154,6 +157,9 @@ python -m src.finalize.main
 
 # 振り分け（被写体別振り分け、デフォルト 4 並列）
 python -m src.sorting.main
+
+# 振り分け（プレフィックス指定で特定の被写体IDのみに絞る）
+python -m src.sorting.main --prefix <PREFIX>
 
 # 振り分け（並列数を指定）
 python -m src.sorting.main --workers 8
