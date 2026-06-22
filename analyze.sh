@@ -13,7 +13,7 @@
 #
 # Options:
 #   --workers N   並列処理ワーカー数（デフォルト: 2）
-#                 Raspberry Pi 4: 2, M4 MacBook Air: 4〜6
+#                 Raspberry Pi: 2, M4 MacBook Air: 4〜6
 
 # スクリプトのあるディレクトリ（プロジェクトルート）に移動する
 cd "$(dirname "$0")" || exit 1

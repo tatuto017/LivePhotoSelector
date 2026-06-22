@@ -8,9 +8,14 @@ import pytest
 
 from src.finalize.main import (
     FinalizeRepository,
+    LycheeApiClient,
+    LycheeRepository,
     PhotoFinalizer,
+    _create_lychee_client,
+    _create_lychee_engine,
     _load_env,
     _run_finalize_for_actor,
+    _run_lychee_remove,
     _run_publish,
     main,
     run,
@@ -31,6 +36,86 @@ class TestLoadEnv:
             _load_env()
 
         mock_load.assert_called_once_with(override=False)
+
+
+# ---------------------------------------------------------------------------
+# _create_lychee_engine
+# ---------------------------------------------------------------------------
+
+
+class TestCreateLycheeEngine:
+    """_create_lychee_engine のテスト。"""
+
+    def test_creates_engine_with_env_vars(self) -> None:
+        """環境変数から lychee DB 用エンジンを生成すること。"""
+        env = {
+            "MYSQL_HOST": "db.host",
+            "MYSQL_PORT": "3307",
+            "LYCHEE_DB_USER": "lychee_user",
+            "LYCHEE_DB_PASSWORD": "lychee_pass",
+            "LYCHEE_DATABASE": "lychee_db",
+        }
+        with patch("src.finalize.main.create_engine") as mock_create:
+            with patch.dict("os.environ", env, clear=True):
+                _create_lychee_engine()
+
+        mock_create.assert_called_once_with(
+            "mysql+pymysql://lychee_user:lychee_pass@db.host:3307/lychee_db"
+        )
+
+    def test_creates_engine_with_default_port(self) -> None:
+        """MYSQL_PORT が未設定のとき 3306 をデフォルトポートとして使用すること。"""
+        env = {
+            "MYSQL_HOST": "db.host",
+            "LYCHEE_DB_USER": "lychee_user",
+            "LYCHEE_DB_PASSWORD": "lychee_pass",
+            "LYCHEE_DATABASE": "lychee_db",
+        }
+        with patch("src.finalize.main.create_engine") as mock_create:
+            with patch.dict("os.environ", env, clear=True):
+                _create_lychee_engine()
+
+        mock_create.assert_called_once_with(
+            "mysql+pymysql://lychee_user:lychee_pass@db.host:3306/lychee_db"
+        )
+
+
+# ---------------------------------------------------------------------------
+# _create_lychee_client
+# ---------------------------------------------------------------------------
+
+
+class TestCreateLycheeClient:
+    """_create_lychee_client のテスト。"""
+
+    def test_creates_client_with_correct_url(self) -> None:
+        """LYCHEE_URL で LycheeClient を生成すること。"""
+        env = {
+            "LYCHEE_URL": "http://lychee.host",
+            "LYCHEE_USER": "lychee_user",
+            "LYCHEE_PASSWORD": "lychee_pass",
+        }
+        with patch("src.finalize.main.pychee_lib.LycheeClient") as mock_cls:
+            mock_cls.return_value = MagicMock()
+            with patch.dict("os.environ", env, clear=True):
+                _create_lychee_client()
+
+        mock_cls.assert_called_once_with("http://lychee.host")
+
+    def test_logs_in_with_env_credentials(self) -> None:
+        """LYCHEE_USER / LYCHEE_PASSWORD でログインすること。"""
+        env = {
+            "LYCHEE_URL": "http://lychee.host",
+            "LYCHEE_USER": "lychee_user",
+            "LYCHEE_PASSWORD": "lychee_pass",
+        }
+        mock_inner = MagicMock()
+        with patch("src.finalize.main.pychee_lib.LycheeClient", return_value=mock_inner):
+            with patch.dict("os.environ", env, clear=True):
+                result = _create_lychee_client()
+
+        mock_inner.login.assert_called_once_with("lychee_user", "lychee_pass")
+        assert isinstance(result, LycheeApiClient)
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +280,192 @@ class TestFinalizeRepository:
         repo.updateFinalize("alice", "photo.jpg", "2026-05-01")
 
         mock_conn.execute.assert_called_once()
+
+    # --- loadNgNotRemovedEntries ---
+
+    def test_load_ng_not_removed_entries_returns_ng_entries(self) -> None:
+        """selection_state='ng' かつ remove=false のエントリを dict リストで返すこと。"""
+        repo, mock_engine = self._make_repo_with_engine()
+        rows = [
+            SimpleNamespace(filename="ng.jpg", shooting_date="2026-04-01", selection_state="ng"),
+        ]
+        self._setup_conn(mock_engine, rows=rows)
+
+        result = repo.loadNgNotRemovedEntries("actor_a")
+
+        assert len(result) == 1
+        assert result[0]["filename"] == "ng.jpg"
+        assert result[0]["shootingDate"] == "2026-04-01"
+        assert result[0]["selectionState"] == "ng"
+
+    def test_load_ng_not_removed_entries_executes_correct_query(self) -> None:
+        """actor_id / selection_state='ng' / remove=false でクエリが実行されること。"""
+        repo, mock_engine = self._make_repo_with_engine()
+        mock_conn = self._setup_conn(mock_engine, rows=[])
+
+        repo.loadNgNotRemovedEntries("actor_a")
+
+        mock_conn.execute.assert_called_once()
+
+    def test_load_ng_not_removed_entries_returns_empty_when_no_rows(self) -> None:
+        """対象 actor の NG エントリが無い場合、空リストを返すこと。"""
+        repo, mock_engine = self._make_repo_with_engine()
+        self._setup_conn(mock_engine, rows=[])
+
+        result = repo.loadNgNotRemovedEntries("actor_a")
+
+        assert result == []
+
+    # --- updateRemove ---
+
+    def test_update_remove_executes_update_sql(self) -> None:
+        """UPDATE sorting_state SET remove = TRUE の SQL が実行されること。"""
+        repo, mock_engine = self._make_repo_with_engine()
+        mock_conn = self._setup_conn(mock_engine)
+
+        repo.updateRemove("actor_a", "img.jpg", "2026-04-01")
+
+        mock_conn.execute.assert_called_once()
+        mock_conn.commit.assert_called_once()
+
+    def test_update_remove_commits_after_execute(self) -> None:
+        """execute 後に commit が呼ばれること。"""
+        repo, mock_engine = self._make_repo_with_engine()
+        mock_conn = self._setup_conn(mock_engine)
+
+        repo.updateRemove("actor_a", "img.jpg", "2026-04-01")
+
+        mock_conn.commit.assert_called_once_with()
+
+    def test_update_remove_passes_correct_params(self) -> None:
+        """正しい actor_id / filename / shooting_date でクエリが実行されること。"""
+        repo, mock_engine = self._make_repo_with_engine()
+        mock_conn = self._setup_conn(mock_engine)
+
+        repo.updateRemove("alice", "photo.jpg", "2026-05-01")
+
+        mock_conn.execute.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# LycheeRepository
+# ---------------------------------------------------------------------------
+
+
+class TestLycheeRepository:
+    """LycheeRepository のテスト。"""
+
+    def _make_repo(self):
+        """テスト用リポジトリと mock Engine を返す。"""
+        mock_engine = MagicMock()
+        return LycheeRepository(engine=mock_engine), mock_engine
+
+    def _setup_conn(self, mock_engine, rows=None):
+        """mock Engine に connect() コンテキストマネージャをセットアップする。"""
+        mock_conn = MagicMock()
+        mock_engine.connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+        if rows is not None:
+            mock_result = MagicMock()
+            mock_result.fetchall.return_value = rows
+            mock_conn.execute.return_value = mock_result
+        return mock_conn
+
+    # --- getAlbumsByParentId ---
+
+    def test_get_albums_by_parent_id_returns_albums(self) -> None:
+        """親アルバム ID 配下のアルバム一覧を dict リストで返すこと。"""
+        repo, mock_engine = self._make_repo()
+        rows = [
+            SimpleNamespace(id="album1", title="2026.04.01"),
+            SimpleNamespace(id="album2", title="2026.04.02"),
+        ]
+        self._setup_conn(mock_engine, rows=rows)
+
+        result = repo.getAlbumsByParentId("root_id")
+
+        assert result == [
+            {"id": "album1", "title": "2026.04.01"},
+            {"id": "album2", "title": "2026.04.02"},
+        ]
+
+    def test_get_albums_by_parent_id_executes_sql(self) -> None:
+        """SQL クエリが実行されること。"""
+        repo, mock_engine = self._make_repo()
+        mock_conn = self._setup_conn(mock_engine, rows=[])
+
+        repo.getAlbumsByParentId("root_id")
+
+        mock_conn.execute.assert_called_once()
+
+    def test_get_albums_by_parent_id_returns_empty_when_no_albums(self) -> None:
+        """配下のアルバムが無い場合、空リストを返すこと。"""
+        repo, mock_engine = self._make_repo()
+        self._setup_conn(mock_engine, rows=[])
+
+        result = repo.getAlbumsByParentId("root_id")
+
+        assert result == []
+
+    # --- getPhotoIdsByAlbumId ---
+
+    def test_get_photo_ids_by_album_id_returns_photo_ids(self) -> None:
+        """アルバム ID 配下の写真 ID リストを返すこと。"""
+        repo, mock_engine = self._make_repo()
+        rows = [
+            SimpleNamespace(photo_id="photo1"),
+            SimpleNamespace(photo_id="photo2"),
+        ]
+        self._setup_conn(mock_engine, rows=rows)
+
+        result = repo.getPhotoIdsByAlbumId("album_id")
+
+        assert result == ["photo1", "photo2"]
+
+    def test_get_photo_ids_by_album_id_executes_sql(self) -> None:
+        """SQL クエリが実行されること。"""
+        repo, mock_engine = self._make_repo()
+        mock_conn = self._setup_conn(mock_engine, rows=[])
+
+        repo.getPhotoIdsByAlbumId("album_id")
+
+        mock_conn.execute.assert_called_once()
+
+    def test_get_photo_ids_by_album_id_returns_empty_when_no_photos(self) -> None:
+        """アルバムに写真が無い場合、空リストを返すこと。"""
+        repo, mock_engine = self._make_repo()
+        self._setup_conn(mock_engine, rows=[])
+
+        result = repo.getPhotoIdsByAlbumId("album_id")
+
+        assert result == []
+
+
+# ---------------------------------------------------------------------------
+# LycheeApiClient
+# ---------------------------------------------------------------------------
+
+
+class TestLycheeApiClient:
+    """LycheeApiClient のテスト。"""
+
+    def test_delete_photos_calls_pychee_delete_photo(self) -> None:
+        """delete_photo が写真 ID リストで呼ばれること。"""
+        mock_pychee = MagicMock()
+        client = LycheeApiClient(mock_pychee)
+
+        client.deletePhotos(["photo1", "photo2"])
+
+        mock_pychee.delete_photo.assert_called_once_with(["photo1", "photo2"])
+
+    def test_delete_photos_does_not_call_api_when_empty_list(self) -> None:
+        """写真 ID が空リストの場合、API を呼ばないこと。"""
+        mock_pychee = MagicMock()
+        client = LycheeApiClient(mock_pychee)
+
+        client.deletePhotos([])
+
+        mock_pychee.delete_photo.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -448,6 +719,233 @@ class TestRunFinalizeForActor:
 
 
 # ---------------------------------------------------------------------------
+# _run_lychee_remove
+# ---------------------------------------------------------------------------
+
+
+class TestRunLycheeRemove:
+    """_run_lychee_remove のテスト。"""
+
+    def _make_mocks(
+        self,
+        actors: list,
+        ng_entries_map: dict,
+        date_albums: list,
+        actor_albums_map: dict,
+        photo_ids_map: dict,
+    ):
+        """テスト用 mock を生成する。"""
+        repo = MagicMock(spec=FinalizeRepository)
+        repo.getActors.return_value = actors
+        repo.loadNgNotRemovedEntries.side_effect = lambda actor: ng_entries_map.get(actor, [])
+
+        lychee_repo = MagicMock(spec=LycheeRepository)
+
+        def _get_albums(parent_id):
+            if parent_id == "root_id":
+                return date_albums
+            return actor_albums_map.get(parent_id, [])
+
+        lychee_repo.getAlbumsByParentId.side_effect = _get_albums
+        lychee_repo.getPhotoIdsByAlbumId.side_effect = lambda album_id: photo_ids_map.get(album_id, [])
+
+        lychee_client = MagicMock(spec=LycheeApiClient)
+        return repo, lychee_repo, lychee_client
+
+    def test_deletes_photos_from_lychee_for_ng_entries(self) -> None:
+        """NG エントリに対応する lychee アルバムの写真が削除されること。"""
+        ng_entries = [{"filename": "ng.jpg", "shootingDate": "2026-04-01", "selectionState": "ng"}]
+        date_albums = [{"id": "date_album_1", "title": "2026.04.01"}]
+        actor_albums = {"date_album_1": [{"id": "actor_album_1", "title": "actor_a"}]}
+        photo_ids = {"actor_album_1": ["photo1", "photo2"]}
+
+        repo, lychee_repo, lychee_client = self._make_mocks(
+            actors=["actor_a"],
+            ng_entries_map={"actor_a": ng_entries},
+            date_albums=date_albums,
+            actor_albums_map=actor_albums,
+            photo_ids_map=photo_ids,
+        )
+
+        _run_lychee_remove(repo, lychee_repo, lychee_client, "root_id")
+
+        lychee_client.deletePhotos.assert_called_once_with(["photo1", "photo2"])
+
+    def test_updates_remove_after_deletion(self) -> None:
+        """削除後に updateRemove が呼ばれること。"""
+        ng_entries = [{"filename": "ng.jpg", "shootingDate": "2026-04-01", "selectionState": "ng"}]
+        date_albums = [{"id": "date_album_1", "title": "2026.04.01"}]
+        actor_albums = {"date_album_1": [{"id": "actor_album_1", "title": "actor_a"}]}
+        photo_ids = {"actor_album_1": ["photo1"]}
+
+        repo, lychee_repo, lychee_client = self._make_mocks(
+            actors=["actor_a"],
+            ng_entries_map={"actor_a": ng_entries},
+            date_albums=date_albums,
+            actor_albums_map=actor_albums,
+            photo_ids_map=photo_ids,
+        )
+
+        _run_lychee_remove(repo, lychee_repo, lychee_client, "root_id")
+
+        repo.updateRemove.assert_called_once_with("actor_a", "ng.jpg", "2026-04-01")
+
+    def test_skips_when_no_ng_entries(self) -> None:
+        """NG エントリが無い場合、削除も updateRemove も呼ばれないこと。"""
+        repo, lychee_repo, lychee_client = self._make_mocks(
+            actors=["actor_a"],
+            ng_entries_map={"actor_a": []},
+            date_albums=[],
+            actor_albums_map={},
+            photo_ids_map={},
+        )
+
+        _run_lychee_remove(repo, lychee_repo, lychee_client, "root_id")
+
+        lychee_client.deletePhotos.assert_not_called()
+        repo.updateRemove.assert_not_called()
+
+    def test_skips_when_date_album_not_found(self) -> None:
+        """撮影日アルバムが見つからない場合、削除も updateRemove も呼ばれないこと。"""
+        ng_entries = [{"filename": "ng.jpg", "shootingDate": "2026-04-01", "selectionState": "ng"}]
+
+        repo, lychee_repo, lychee_client = self._make_mocks(
+            actors=["actor_a"],
+            ng_entries_map={"actor_a": ng_entries},
+            date_albums=[],
+            actor_albums_map={},
+            photo_ids_map={},
+        )
+
+        _run_lychee_remove(repo, lychee_repo, lychee_client, "root_id")
+
+        lychee_client.deletePhotos.assert_not_called()
+        repo.updateRemove.assert_not_called()
+
+    def test_skips_when_actor_album_not_found(self) -> None:
+        """被写体アルバムが見つからない場合、削除も updateRemove も呼ばれないこと。"""
+        ng_entries = [{"filename": "ng.jpg", "shootingDate": "2026-04-01", "selectionState": "ng"}]
+        date_albums = [{"id": "date_album_1", "title": "2026.04.01"}]
+        actor_albums = {"date_album_1": []}
+
+        repo, lychee_repo, lychee_client = self._make_mocks(
+            actors=["actor_a"],
+            ng_entries_map={"actor_a": ng_entries},
+            date_albums=date_albums,
+            actor_albums_map=actor_albums,
+            photo_ids_map={},
+        )
+
+        _run_lychee_remove(repo, lychee_repo, lychee_client, "root_id")
+
+        lychee_client.deletePhotos.assert_not_called()
+        repo.updateRemove.assert_not_called()
+
+    def test_updates_remove_even_when_no_photos_in_album(self) -> None:
+        """アルバムに写真が無くても updateRemove が呼ばれること。"""
+        ng_entries = [{"filename": "ng.jpg", "shootingDate": "2026-04-01", "selectionState": "ng"}]
+        date_albums = [{"id": "date_album_1", "title": "2026.04.01"}]
+        actor_albums = {"date_album_1": [{"id": "actor_album_1", "title": "actor_a"}]}
+        photo_ids = {"actor_album_1": []}
+
+        repo, lychee_repo, lychee_client = self._make_mocks(
+            actors=["actor_a"],
+            ng_entries_map={"actor_a": ng_entries},
+            date_albums=date_albums,
+            actor_albums_map=actor_albums,
+            photo_ids_map=photo_ids,
+        )
+
+        _run_lychee_remove(repo, lychee_repo, lychee_client, "root_id")
+
+        lychee_client.deletePhotos.assert_not_called()
+        repo.updateRemove.assert_called_once_with("actor_a", "ng.jpg", "2026-04-01")
+
+    def test_groups_entries_by_shooting_date(self) -> None:
+        """同じ撮影日の複数エントリは1回の削除にまとめられること。"""
+        ng_entries = [
+            {"filename": "ng1.jpg", "shootingDate": "2026-04-01", "selectionState": "ng"},
+            {"filename": "ng2.jpg", "shootingDate": "2026-04-01", "selectionState": "ng"},
+            {"filename": "ng3.jpg", "shootingDate": "2026-04-02", "selectionState": "ng"},
+        ]
+        date_albums = [
+            {"id": "date_album_1", "title": "2026.04.01"},
+            {"id": "date_album_2", "title": "2026.04.02"},
+        ]
+        actor_albums = {
+            "date_album_1": [{"id": "actor_album_1", "title": "actor_a"}],
+            "date_album_2": [{"id": "actor_album_2", "title": "actor_a"}],
+        }
+        photo_ids = {
+            "actor_album_1": ["photo1"],
+            "actor_album_2": ["photo2"],
+        }
+
+        repo, lychee_repo, lychee_client = self._make_mocks(
+            actors=["actor_a"],
+            ng_entries_map={"actor_a": ng_entries},
+            date_albums=date_albums,
+            actor_albums_map=actor_albums,
+            photo_ids_map=photo_ids,
+        )
+
+        _run_lychee_remove(repo, lychee_repo, lychee_client, "root_id")
+
+        assert lychee_client.deletePhotos.call_count == 2
+        assert repo.updateRemove.call_count == 3
+
+    def test_processes_multiple_actors(self) -> None:
+        """複数被写体それぞれに対して削除処理が行われること。"""
+        date_albums = [{"id": "date_album_1", "title": "2026.04.01"}]
+        actor_albums = {
+            "date_album_1": [
+                {"id": "actor_album_a", "title": "actor_a"},
+                {"id": "actor_album_b", "title": "actor_b"},
+            ],
+        }
+        photo_ids = {
+            "actor_album_a": ["photo1"],
+            "actor_album_b": ["photo2"],
+        }
+        ng_entries_map = {
+            "actor_a": [{"filename": "ng_a.jpg", "shootingDate": "2026-04-01", "selectionState": "ng"}],
+            "actor_b": [{"filename": "ng_b.jpg", "shootingDate": "2026-04-01", "selectionState": "ng"}],
+        }
+
+        repo, lychee_repo, lychee_client = self._make_mocks(
+            actors=["actor_a", "actor_b"],
+            ng_entries_map=ng_entries_map,
+            date_albums=date_albums,
+            actor_albums_map=actor_albums,
+            photo_ids_map=photo_ids,
+        )
+
+        _run_lychee_remove(repo, lychee_repo, lychee_client, "root_id")
+
+        assert lychee_client.deletePhotos.call_count == 2
+        assert repo.updateRemove.call_count == 2
+
+    def test_converts_date_format_for_album_title(self) -> None:
+        """shooting_date (YYYY-MM-DD) を lychee アルバムタイトル (YYYY.MM.DD) に変換すること。"""
+        ng_entries = [{"filename": "ng.jpg", "shootingDate": "2026-04-15", "selectionState": "ng"}]
+        date_albums = [{"id": "date_album_1", "title": "2026.04.15"}]
+        actor_albums = {"date_album_1": [{"id": "actor_album_1", "title": "actor_a"}]}
+        photo_ids = {"actor_album_1": ["photo1"]}
+
+        repo, lychee_repo, lychee_client = self._make_mocks(
+            actors=["actor_a"],
+            ng_entries_map={"actor_a": ng_entries},
+            date_albums=date_albums,
+            actor_albums_map=actor_albums,
+            photo_ids_map=photo_ids,
+        )
+
+        _run_lychee_remove(repo, lychee_repo, lychee_client, "root_id")
+
+        lychee_client.deletePhotos.assert_called_once_with(["photo1"])
+
+
+# ---------------------------------------------------------------------------
 # run
 # ---------------------------------------------------------------------------
 
@@ -468,15 +966,21 @@ class TestRun:
         """_load_env が呼ばれること。"""
         data_root, mock_engine, repo, finalizer = self._make_deps(tmp_path)
         repo.getActors.return_value = []
+        lychee_repo = MagicMock(spec=LycheeRepository)
+        lychee_client = MagicMock(spec=LycheeApiClient)
 
         with patch("src.finalize.main._load_env") as mock_env:
-            run(
-                mode="finalize",
-                repository=repo,
-                finalizer=finalizer,
-                data_root=data_root,
-                engine=mock_engine,
-            )
+            with patch("src.finalize.main._run_lychee_remove"):
+                with patch.dict("os.environ", {"LYCHEE_ROOT_ALBUM_ID": "root"}):
+                    run(
+                        mode="finalize",
+                        repository=repo,
+                        finalizer=finalizer,
+                        data_root=data_root,
+                        engine=mock_engine,
+                        lychee_repository=lychee_repo,
+                        lychee_client=lychee_client,
+                    )
 
         mock_env.assert_called_once_with()
 
@@ -484,18 +988,22 @@ class TestRun:
         """mode='finalize' のとき全被写体に対して _run_finalize_for_actor が呼ばれること。"""
         data_root, mock_engine, repo, finalizer = self._make_deps(tmp_path)
         repo.getActors.return_value = ["actor_a", "actor_b"]
+        lychee_repo = MagicMock(spec=LycheeRepository)
+        lychee_client = MagicMock(spec=LycheeApiClient)
 
         with patch("src.finalize.main._load_env"):
-            with patch(
-                "src.finalize.main._run_finalize_for_actor"
-            ) as mock_finalize:
-                run(
-                    mode="finalize",
-                    repository=repo,
-                    finalizer=finalizer,
-                    data_root=data_root,
-                    engine=mock_engine,
-                )
+            with patch("src.finalize.main._run_finalize_for_actor") as mock_finalize:
+                with patch("src.finalize.main._run_lychee_remove"):
+                    with patch.dict("os.environ", {"LYCHEE_ROOT_ALBUM_ID": "root"}):
+                        run(
+                            mode="finalize",
+                            repository=repo,
+                            finalizer=finalizer,
+                            data_root=data_root,
+                            engine=mock_engine,
+                            lychee_repository=lychee_repo,
+                            lychee_client=lychee_client,
+                        )
 
         assert mock_finalize.call_count == 2
         calls = mock_finalize.call_args_list
@@ -516,25 +1024,90 @@ class TestRun:
 
         mock_publish.assert_called_once_with(repo)
 
+    def test_run_calls_lychee_remove_in_finalize_mode(self, tmp_path: Path) -> None:
+        """mode='finalize' のとき _run_lychee_remove が呼ばれること。"""
+        data_root, mock_engine, repo, finalizer = self._make_deps(tmp_path)
+        repo.getActors.return_value = []
+        lychee_repo = MagicMock(spec=LycheeRepository)
+        lychee_client = MagicMock(spec=LycheeApiClient)
+
+        with patch("src.finalize.main._load_env"):
+            with patch("src.finalize.main._run_lychee_remove") as mock_lychee_remove:
+                with patch.dict("os.environ", {"LYCHEE_ROOT_ALBUM_ID": "root123"}):
+                    run(
+                        mode="finalize",
+                        repository=repo,
+                        finalizer=finalizer,
+                        data_root=data_root,
+                        engine=mock_engine,
+                        lychee_repository=lychee_repo,
+                        lychee_client=lychee_client,
+                    )
+
+        mock_lychee_remove.assert_called_once_with(repo, lychee_repo, lychee_client, "root123")
+
+    def test_run_uses_album_id_param_over_env(self, tmp_path: Path) -> None:
+        """album_id 引数が LYCHEE_ROOT_ALBUM_ID 環境変数より優先されること。"""
+        data_root, mock_engine, repo, finalizer = self._make_deps(tmp_path)
+        repo.getActors.return_value = []
+        lychee_repo = MagicMock(spec=LycheeRepository)
+        lychee_client = MagicMock(spec=LycheeApiClient)
+
+        with patch("src.finalize.main._load_env"):
+            with patch("src.finalize.main._run_lychee_remove") as mock_lychee_remove:
+                with patch.dict("os.environ", {"LYCHEE_ROOT_ALBUM_ID": "env_root"}):
+                    run(
+                        mode="finalize",
+                        repository=repo,
+                        finalizer=finalizer,
+                        data_root=data_root,
+                        engine=mock_engine,
+                        album_id="param_root",
+                        lychee_repository=lychee_repo,
+                        lychee_client=lychee_client,
+                    )
+
+        mock_lychee_remove.assert_called_once_with(repo, lychee_repo, lychee_client, "param_root")
+
+    def test_run_does_not_call_lychee_remove_in_publish_mode(self, tmp_path: Path) -> None:
+        """mode='publish' のとき _run_lychee_remove は呼ばれないこと。"""
+        data_root, mock_engine, repo, finalizer = self._make_deps(tmp_path)
+
+        with patch("src.finalize.main._load_env"):
+            with patch("src.finalize.main._run_publish"):
+                with patch("src.finalize.main._run_lychee_remove") as mock_lychee_remove:
+                    run(mode="publish", repository=repo, engine=mock_engine)
+
+        mock_lychee_remove.assert_not_called()
+
     def test_run_creates_default_instances_from_env_finalize(self, tmp_path: Path) -> None:
         """mode='finalize' で依存オブジェクトを省略した場合、環境変数からインスタンスを生成すること。"""
         data_root = tmp_path / "data"
         mock_engine = MagicMock()
+        mock_lychee_engine = MagicMock()
 
         with patch("src.finalize.main._load_env"):
             with patch("src.finalize.main._create_engine", return_value=mock_engine):
-                with patch.dict("os.environ", {"DATA_ROOT": str(data_root)}):
-                    with patch("src.finalize.main.FinalizeRepository") as mock_repo_cls:
-                        with patch("src.finalize.main.PhotoFinalizer") as mock_finalizer_cls:
-                            mock_repo = MagicMock(spec=FinalizeRepository)
-                            mock_repo.getActors.return_value = []
-                            mock_repo_cls.return_value = mock_repo
-                            mock_finalizer_cls.return_value = MagicMock(spec=PhotoFinalizer)
+                with patch("src.finalize.main._create_lychee_engine", return_value=mock_lychee_engine):
+                    with patch("src.finalize.main._create_lychee_client") as mock_create_lychee_client:
+                        mock_create_lychee_client.return_value = MagicMock(spec=LycheeApiClient)
+                        with patch.dict("os.environ", {"DATA_ROOT": str(data_root), "LYCHEE_ROOT_ALBUM_ID": "root"}):
+                            with patch("src.finalize.main.FinalizeRepository") as mock_repo_cls:
+                                with patch("src.finalize.main.PhotoFinalizer") as mock_finalizer_cls:
+                                    with patch("src.finalize.main.LycheeRepository") as mock_lychee_repo_cls:
+                                        with patch("src.finalize.main._run_lychee_remove"):
+                                            mock_repo = MagicMock(spec=FinalizeRepository)
+                                            mock_repo.getActors.return_value = []
+                                            mock_repo_cls.return_value = mock_repo
+                                            mock_finalizer_cls.return_value = MagicMock(spec=PhotoFinalizer)
+                                            mock_lychee_repo_cls.return_value = MagicMock(spec=LycheeRepository)
 
-                            run(mode="finalize")
+                                            run(mode="finalize")
 
         mock_repo_cls.assert_called_once_with(mock_engine)
         mock_finalizer_cls.assert_called_once_with(data_root)
+        mock_lychee_repo_cls.assert_called_once_with(mock_lychee_engine)
+        mock_create_lychee_client.assert_called_once()
 
     def test_run_creates_default_instances_from_env_publish(self, tmp_path: Path) -> None:
         """mode='publish' で依存オブジェクトを省略した場合、repository のみを生成して _run_publish に渡すこと。"""
@@ -562,12 +1135,12 @@ class TestMain:
     """main() の CLI 引数テスト。"""
 
     def test_main_calls_run_with_finalize_by_default(self) -> None:
-        """引数なしのとき run(mode='finalize') が呼ばれること。"""
+        """引数なしのとき run(mode='finalize', album_id=None) が呼ばれること。"""
         with patch("sys.argv", ["main.py"]):
             with patch("src.finalize.main.run") as mock_run:
                 main()
 
-        mock_run.assert_called_once_with(mode="finalize")
+        mock_run.assert_called_once_with(mode="finalize", album_id=None)
 
     def test_main_calls_run_with_publish_flag(self) -> None:
         """--publish フラグのとき run(mode='publish') が呼ばれること。"""
@@ -576,3 +1149,19 @@ class TestMain:
                 main()
 
         mock_run.assert_called_once_with(mode="publish")
+
+    def test_main_passes_album_id_to_run(self) -> None:
+        """--album_id 引数が run() に渡されること。"""
+        with patch("sys.argv", ["main.py", "--album_id=root123"]):
+            with patch("src.finalize.main.run") as mock_run:
+                main()
+
+        mock_run.assert_called_once_with(mode="finalize", album_id="root123")
+
+    def test_main_passes_none_album_id_when_not_specified(self) -> None:
+        """--album_id を省略したとき album_id=None で run() が呼ばれること。"""
+        with patch("sys.argv", ["main.py"]):
+            with patch("src.finalize.main.run") as mock_run:
+                main()
+
+        mock_run.assert_called_once_with(mode="finalize", album_id=None)

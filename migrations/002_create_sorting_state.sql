@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS sorting_state (
     selected_at      DATETIME      NULL     DEFAULT NULL    COMMENT '選択確定日時',
     public           BOOLEAN       NOT NULL DEFAULT FALSE   COMMENT '公開フラグ（ANALYZE_ROOT から DATA_ROOT への移動完了後に true）',
     finalize         BOOLEAN       NOT NULL DEFAULT FALSE   COMMENT '移動済み',
+    remove           BOOLEAN       NOT NULL DEFAULT FALSE   COMMENT '削除済み',
 
     PRIMARY KEY (actor_id, filename, shooting_date)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='写真選択状態テーブル';
