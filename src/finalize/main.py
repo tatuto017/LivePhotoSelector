@@ -168,7 +168,7 @@ class FinalizeRepository:
             .where(
                 sorting_state.c.actor_id == actor,
                 sorting_state.c.selection_state == "ng",
-                sorting_state.c.remove == False,  # noqa: E712
+                sorting_state.c["remove"] == False,  # noqa: E712
             )
             .order_by(sorting_state.c.filename)
         )
