@@ -316,6 +316,22 @@ class TestFinalizeRepository:
 
         assert result == []
 
+    def test_load_ng_not_removed_entries_includes_remove_false_in_query(self) -> None:
+        """クエリの WHERE 句に remove カラムの条件が含まれること。
+
+        sorting_state.c.remove が Python の .remove() メソッドに解決される
+        SQLAlchemy の命名衝突を防ぐため sorting_state.c["remove"] を使用する。
+        このテストはその条件が実際に SQL に含まれることを確認する。
+        """
+        repo, mock_engine = self._make_repo_with_engine()
+        mock_conn = self._setup_conn(mock_engine, rows=[])
+
+        repo.loadNgNotRemovedEntries("actor_a")
+
+        stmt = mock_conn.execute.call_args[0][0]
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "remove" in compiled.lower()
+
     # --- updateRemove ---
 
     def test_update_remove_executes_update_sql(self) -> None:
