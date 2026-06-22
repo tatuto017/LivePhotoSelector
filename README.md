@@ -14,7 +14,7 @@
 | 振り分けスクリプト | Python 3.13, PyTorch, CLIP (OpenAI), Pillow, tqdm |
 | 移動スクリプト | Python 3.13, SQLAlchemy, python-dotenv |
 | データベース | MariaDB（Raspberry Pi 上で稼働） |
-| ホスティング | Raspberry Pi 4 + Cloudflare Tunnel |
+| ホスティング | Raspberry Pi + Cloudflare Tunnel |
 | ストレージ | Mac の `DATA_ROOT` ディレクトリを Pi の `data/` にマウント |
 
 ## 操作ワークフロー
@@ -98,7 +98,7 @@ cp .env.example .env
 
 #### 4. 初回実行時の注意
 
-初回実行時に DeepFace が感情モデル・Facenet モデルをダウンロードする（合計 約 100MB）。  
+初回実行時に DeepFace が感情モデル・Facenet モデルをダウンロードする（合計 約 100MB）。
 ダウンロード先は `~/.deepface/weights/`。
 
 ### 環境変数
@@ -116,6 +116,13 @@ Next.js（Pi）と Python スクリプト（Mac）で同じ変数名を共有す
 | `MYSQL_USER` | MariaDB ユーザー名 |
 | `MYSQL_PASSWORD` | MariaDB パスワード |
 | `MYSQL_DATABASE` | MariaDB データベース名 |
+| `LYCHEE_URL` | lychee のURL |
+| `LYCHEE_PASSWORD` | lychee パスワード |
+| `LYCHEE_USER` | lychee ユーザー名 |
+| `LYCHEE_DATABASE` | lychee データベース名 |
+| `LYCHEE_DB_USER` | lychee DBのユーザー名 |
+| `LYCHEE_DB_PASSWORD` | lychee DBのパスワード |
+| `LYCHEE_ROOT_ALBUM_ID` | デフォルトのルートアルバムID |
 
 ```bash
 PROJECT_ROOT=/path/to/LivePhotoSelector
@@ -127,6 +134,13 @@ MYSQL_PORT=3306
 MYSQL_USER=livephoto
 MYSQL_PASSWORD=secret
 MYSQL_DATABASE=livephoto
+LYCHEE_URL=url
+LYCHEE_USER=lychee
+LYCHEE_PASSWORD=secret
+LYCHEE_DATABASE=lychee
+LYCHEE_DB_USER=lychee
+LYCHEE_DB_PASSWORD=secret
+LYCHEE_ROOT_ALBUM_ID=album_id
 ```
 
 ## 実行コマンド
@@ -154,6 +168,9 @@ python -m src.scoring.main
 
 # 写真整理（OK → confirmed/、NG → 削除）
 python -m src.finalize.main
+
+# 写真整理（lychee のルートアルバムIDを指定する場合。未指定時は環境変数 LYCHEE_ROOT_ALBUM_ID を使用）
+python -m src.finalize.main --album_id=<ALBUM_ID>
 
 # 振り分け（被写体別振り分け、デフォルト 4 並列）
 python -m src.sorting.main

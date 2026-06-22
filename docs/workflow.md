@@ -10,7 +10,7 @@
             → MariaDB の sorting_state テーブルに INSERT
             ↓ 解析完了後、{ANALYZE_ROOT}/{actor}/ を手動で {DATA_ROOT}/images/{actor}/ に移動
             → analyze.sh 再実行で sorting_state.public を true に更新（公開処理）
-            Raspberry Pi 4（MariaDB サーバー稼働）
+            Raspberry Pi（MariaDB サーバー稼働）
                 → Next.js が images/ を配信 + MariaDB を直接読み書き
                     ↓ Cloudflare Tunnel（外出先）/ LAN（自宅）
                 iPhone で OK/NG 選択・スワイプで即確定
@@ -60,4 +60,7 @@
 
 8. 写真整理（OK → confirmed/ へ移動、NG → 削除）
    python -m src.finalize.main
+
+   # lychee のルートアルバムIDを指定する場合（未指定時は環境変数 LYCHEE_ROOT_ALBUM_ID を使用）
+   python -m src.finalize.main --album_id=<ALBUM_ID>
 ```

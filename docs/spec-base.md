@@ -58,6 +58,13 @@ Next.js（Pi）と Python 解析スクリプト（Mac）で環境依存の部分
 | `MYSQL_USER` | MySQL ユーザー名 |
 | `MYSQL_PASSWORD` | MySQL パスワード |
 | `MYSQL_DATABASE` | MySQL データベース名 |
+| `LYCHEE_URL` | lychee のURL |
+| `LYCHEE_PASSWORD` | lychee パスワード |
+| `LYCHEE_USER` | lychee ユーザー名 |
+| `LYCHEE_DATABASE` | lychee データベース名 |
+| `LYCHEE_DB_USER` | lychee DBのユーザー名 |
+| `LYCHEE_DB_PASSWORD` | lychee DBのパスワード |
+| `LYCHEE_ROOT_ALBUM_ID` | デフォルトのルートアルバムID |
 
 **設定例（Mac）:**
 ```bash
@@ -68,6 +75,13 @@ MYSQL_PORT=3306
 MYSQL_USER=livephoto
 MYSQL_PASSWORD=secret
 MYSQL_DATABASE=livephoto
+LYCHEE_URL=url
+LYCHEE_USER=lychee
+LYCHEE_PASSWORD=secret
+LYCHEE_DATABASE=lychee
+LYCHEE_DB_USER=lychee
+LYCHEE_DB_PASSWORD=secret
+LYCHEE_ROOT_ALBUM_ID=album_id
 ```
 
 **設定例（Pi）:**

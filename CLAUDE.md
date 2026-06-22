@@ -23,8 +23,8 @@ iPhone から高速に選別するための Web アプリ。
 | 振り分けスクリプト | Python 3.13, PyTorch, CLIP (OpenAI), Pillow, tqdm |
 | 移動スクリプト | Python 3.13, SQLAlchemy, python-dotenv |
 | データベース | MariaDB（Raspberry Pi 上で稼働） |
-| ホスティング | Raspberry Pi 4 + Cloudflare Tunnel |
-
+| ホスティング | Raspberry Pi + Cloudflare Tunnel |
+| [lychee](https://github.com/electerious/lychee) | Raspberry Pi に `Docker` で構築 |
 ---
 
 ## ビルド・実行コマンド
@@ -57,6 +57,13 @@ Next.js（Pi）と Python 解析スクリプト（Mac）で同じ変数名を共
 | `MYSQL_USER` | MariaDB ユーザー名 |
 | `MYSQL_PASSWORD` | MariaDB パスワード |
 | `MYSQL_DATABASE` | MariaDB データベース名 |
+| `LYCHEE_URL` | lychee のURL |
+| `LYCHEE_USER` | lychee ユーザー名 |
+| `LYCHEE_PASSWORD` | lychee パスワード |
+| `LYCHEE_DATABASE` | lychee データベース名 |
+| `LYCHEE_DB_USER` | lychee DBのユーザー名 |
+| `LYCHEE_DB_PASSWORD` | lychee DBのパスワード |
+| `LYCHEE_ROOT_ALBUM_ID` | デフォルトのルートアルバムID |
 
 ---
 

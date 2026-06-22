@@ -38,7 +38,6 @@ from tqdm import tqdm
 
 from src.db_schema import analysis_records, sorting_state
 
-
 # ---------------------------------------------------------------------------
 # データクラス
 # ---------------------------------------------------------------------------
@@ -203,9 +202,11 @@ class AnalysisRepository:
                 neutral=row.neutral,
                 faceAngle=row.face_angle,
                 isOccluded=bool(row.is_occluded),
-                face_embedding=json.loads(row.face_embedding)
-                if isinstance(row.face_embedding, str)
-                else row.face_embedding,
+                face_embedding=(
+                    json.loads(row.face_embedding)
+                    if isinstance(row.face_embedding, str)
+                    else row.face_embedding
+                ),
             )
             for row in rows
         ]
@@ -237,20 +238,24 @@ class AnalysisRepository:
         Args:
             record: 挿入する AnalysisRecord。
         """
-        stmt = insert(analysis_records).prefix_with("IGNORE").values(
-            actor=record.actor,
-            filename=record.filename,
-            shooting_date=record.shootingDate,
-            angry=record.angry,
-            fear=record.fear,
-            happy=record.happy,
-            sad=record.sad,
-            surprise=record.surprise,
-            disgust=record.disgust,
-            neutral=record.neutral,
-            face_angle=record.faceAngle,
-            is_occluded=1 if record.isOccluded else 0,
-            face_embedding=json.dumps(record.face_embedding),
+        stmt = (
+            insert(analysis_records)
+            .prefix_with("IGNORE")
+            .values(
+                actor=record.actor,
+                filename=record.filename,
+                shooting_date=record.shootingDate,
+                angry=record.angry,
+                fear=record.fear,
+                happy=record.happy,
+                sad=record.sad,
+                surprise=record.surprise,
+                disgust=record.disgust,
+                neutral=record.neutral,
+                face_angle=record.faceAngle,
+                is_occluded=1 if record.isOccluded else 0,
+                face_embedding=json.dumps(record.face_embedding),
+            )
         )
         with self._engine.connect() as conn:
             conn.execute(stmt)
@@ -267,13 +272,17 @@ class AnalysisRepository:
             actor: 被写体 ID。
             entry: 挿入する AnalysisEntry。
         """
-        stmt = insert(sorting_state).prefix_with("IGNORE").values(
-            actor_id=actor,
-            filename=entry.filename,
-            shooting_date=entry.shootingDate,
-            score=entry.score,
-            selection_state=entry.selectionState,
-            selected_at=entry.selectedAt,
+        stmt = (
+            insert(sorting_state)
+            .prefix_with("IGNORE")
+            .values(
+                actor_id=actor,
+                filename=entry.filename,
+                shooting_date=entry.shootingDate,
+                score=entry.score,
+                selection_state=entry.selectionState,
+                selected_at=entry.selectedAt,
+            )
         )
         with self._engine.connect() as conn:
             conn.execute(stmt)
@@ -416,7 +425,7 @@ def _run_analyze(
         analyze_root: 解析作業ディレクトリ（{actor}/ サブディレクトリを含む）。
         analyzer: PhotoAnalyzer インスタンス。
         repository: AnalysisRepository インスタンス。
-        max_workers: 並列処理の最大ワーカー数（Raspberry Pi 4 では 2 を推奨）。
+        max_workers: 並列処理の最大ワーカー数（Raspberry Pi では 2 を推奨）。
     """
     if not analyze_root.exists():
         print(f"[INFO] ANALYZE_ROOT が存在しません: {analyze_root}")
@@ -485,7 +494,9 @@ def _run_analyze(
         shooting_date = (
             record.shootingDate if record is not None else _get_shooting_date(img_path)
         )
-        entry = AnalysisEntry(filename=filename, shootingDate=shooting_date, score=score)
+        entry = AnalysisEntry(
+            filename=filename, shootingDate=shooting_date, score=score
+        )
 
         # DB 書き込みと共有キャッシュ更新はロックで保護する
         with lock:
@@ -500,7 +511,9 @@ def _run_analyze(
             executor.submit(_process_one, actor, filename, img_path): (actor, filename)
             for actor, filename, img_path in pending_entries
         }
-        for future in tqdm(as_completed(futures), total=len(pending_entries), desc="解析", unit="枚"):
+        for future in tqdm(
+            as_completed(futures), total=len(pending_entries), desc="解析", unit="枚"
+        ):
             try:
                 future.result()
             except Exception as e:
@@ -541,7 +554,7 @@ def main() -> None:
         "--workers",
         type=int,
         default=2,
-        help="並列処理の最大ワーカー数（Raspberry Pi 4 では 2 を推奨、デフォルト: 2）",
+        help="並列処理の最大ワーカー数（Raspberry Pi では 2 を推奨、デフォルト: 2）",
     )
     args = parser.parse_args()
 
